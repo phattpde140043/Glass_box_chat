@@ -25,8 +25,8 @@ export const agentStatusSchema = z.enum(chatContract.agentStatuses);
 export const chatPromptSchema = z
   .string()
   .trim()
-  .min(chatContract.chatPrompt.minLength, "Tin nhắn không được để trống.")
-  .max(chatContract.chatPrompt.maxLength, `Tin nhắn không được vượt quá ${chatContract.chatPrompt.maxLength} ký tự.`);
+  .min(chatContract.chatPrompt.minLength, "Message cannot be empty.")
+  .max(chatContract.chatPrompt.maxLength, `Message cannot exceed ${chatContract.chatPrompt.maxLength} characters.`);
 
 export const runChatRequestSchema = z.object({
   prompt: chatPromptSchema,
@@ -35,7 +35,7 @@ export const runChatRequestSchema = z.object({
 export const chatMessageSchema = z.object({
   id: z.string().min(1),
   role: messageRoleSchema,
-  content: z.string().trim().min(1, "Nội dung tin nhắn không hợp lệ."),
+  content: z.string().trim().min(1, "Message content is invalid."),
 });
 
 export const traceEventSchema = z.object({

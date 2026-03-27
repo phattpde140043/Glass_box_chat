@@ -14,10 +14,10 @@ const INPUT_MAX_LENGTH = 2000;
 
 function buildRequestFailureMessage(error: unknown): string {
   if (error instanceof Error) {
-    return `Không gửi được yêu cầu tới backend. Lỗi: ${error.message}. Vui lòng kiểm tra API đang chạy ở cổng 8000.`;
+    return `Failed to send the request to the backend. Error: ${error.message}. Please verify the API is running on port 8000.`;
   }
 
-  return "Không gửi được yêu cầu tới backend. Vui lòng kiểm tra API đang chạy ở cổng 8000.";
+  return "Failed to send the request to the backend. Please verify the API is running on port 8000.";
 }
 
 function mergeTraceEvents(...eventGroups: TraceEventRecord[][]): TraceEventRecord[] {

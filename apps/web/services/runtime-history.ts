@@ -63,7 +63,7 @@ export async function loadRuntimeHistory(sessionLimit = 5): Promise<TraceEventRe
   });
 
   if (!sessionsResponse.ok) {
-    throw new Error(`Không tải được danh sách session từ backend: HTTP ${sessionsResponse.status}`);
+    throw new Error(`Failed to load the session list from the backend: HTTP ${sessionsResponse.status}`);
   }
 
   const sessionsPayload = (await sessionsResponse.json()) as RuntimeSessionsResponse;
