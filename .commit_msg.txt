@@ -1,0 +1,9 @@
+feat: migrate types layer and model/validation setup
+
+- Add @glassbox/types package with chat contracts and schemas
+- Create chat-contract.json with validation rules and event types
+- Implement ChatMessageModel for message handling
+- Implement RunChatRequestModel for request validation
+- Implement TraceEventModel for trace event management
+- Add models and validation re-exports in web app
+- Update web app dependencies to use @glassbox/types from workspace
