@@ -45,7 +45,7 @@ export function TracePanel({
           </article>
           <article className="trace-metric-card">
             <span className="trace-metric-label">Executor</span>
-            <strong>{runtimeMetrics.avg_node_timeout_ms} ms</strong>
+            <strong>{runtimeMetrics.avg_node_duration_ms} ms</strong>
             <span className="trace-metric-caption">Avg node duration</span>
           </article>
           <article className="trace-metric-card">
