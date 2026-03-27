@@ -6,7 +6,7 @@ import { traceStorage } from "../lib/trace-storage";
 import { ChatMessageModel, initialAssistantMessage } from "../models/chat-message";
 import { RunChatRequestModel } from "../models/chat-run-request";
 import { INITIAL_TRACE_WINDOW, TRACE_WINDOW_STEP, TraceEventModel } from "../models/trace-event";
-import { loadRuntimeHistory } from "../service/runtime-history";
+import { loadRuntimeHistory } from "../services/runtime-history";
 import { useTraceStore } from "../store/trace-store";
 import type { AgentStatus, ChatMessageRecord, TraceEventRecord } from "../validation/chat-schemas";
 
@@ -200,7 +200,7 @@ export function useChatRuntime() {
     setShowScrollToLatest(!isNearBottom);
 
     if (element.scrollTop <= 24 && hiddenTraceCount > 0) {
-      setVisibleTraceCount((previousCount) => Math.min(traceEvents.length, previousCount + TRACE_WINDOW_STEP));
+      setVisibleTraceCount((previousCount: number) => Math.min(traceEvents.length, previousCount + TRACE_WINDOW_STEP));
     }
   };
 
