@@ -218,6 +218,8 @@ apps/web/*.tsbuildinfo
 apps/web/next-env.d.ts
 apps/web/.env*
 !apps/web/.env.example
+!apps/web/lib/
+!apps/web/lib/*.ts
 
 # Sensitive key/certificate artifacts
 *.pem
