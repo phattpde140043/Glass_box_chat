@@ -2,7 +2,7 @@
 
 import { ChatHeader } from "./chat-header";
 import { ChatInputForm } from "./chat-input-form";
-import { ChatMessageList } from "./chat-message-list-component";
+import { ChatMessageList } from "./chat-message-list";
 import { TracePanel } from "./trace-panel";
 import { useChatRuntime } from "../hooks/use-chat-runtime";
 
