@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
+const DEFAULT_SESSION_LIMIT = 10;
+const MAX_SESSION_LIMIT = 50;
+
 function buildBackendUrl(path: string): string {
   const baseUrl =
     process.env.API_BASE_URL?.trim() || process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || "http://localhost:8000";
@@ -9,8 +12,18 @@ function buildBackendUrl(path: string): string {
   return `${baseUrl}${path}`;
 }
 
+function normalizeLimit(value: string | null): number {
+  const parsed = Number(value ?? DEFAULT_SESSION_LIMIT);
+
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_SESSION_LIMIT;
+  }
+
+  return Math.min(MAX_SESSION_LIMIT, Math.max(1, Math.trunc(parsed)));
+}
+
 export async function GET(request: NextRequest) {
-  const limit = request.nextUrl.searchParams.get("limit") ?? "10";
+  const limit = normalizeLimit(request.nextUrl.searchParams.get("limit"));
 
   let upstreamResponse: Response;
 
