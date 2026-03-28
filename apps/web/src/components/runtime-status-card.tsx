@@ -14,9 +14,22 @@ export function RuntimeStatusCard() {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>(INITIAL_STATUS);
 
   useEffect(() => {
+    let isMounted = true;
+    let isFetching = false;
+
     const refresh = async () => {
+      if (isFetching) {
+        return;
+      }
+
+      isFetching = true;
       const nextStatus = await loadRuntimeStatus();
-      setRuntimeStatus(nextStatus);
+
+      if (isMounted) {
+        setRuntimeStatus(nextStatus);
+      }
+
+      isFetching = false;
     };
 
     void refresh();
@@ -24,7 +37,10 @@ export function RuntimeStatusCard() {
       void refresh();
     }, 10000);
 
-    return () => clearInterval(timer);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
   }, []);
 
   return (
