@@ -29,6 +29,40 @@ function toErrorMessage(error: unknown): string {
   return "Unable to process stream from runtime backend.";
 }
 
+type UpstreamErrorPayload = {
+  error?: string;
+  message?: string;
+};
+
+async function extractUpstreamError(response: Response): Promise<string> {
+  const fallback = `Runtime backend returned HTTP ${response.status}.`;
+
+  try {
+    const payload = (await response.json()) as UpstreamErrorPayload;
+
+    if (typeof payload.error === "string" && payload.error.trim().length > 0) {
+      return payload.error;
+    }
+
+    if (typeof payload.message === "string" && payload.message.trim().length > 0) {
+      return payload.message;
+    }
+
+    return fallback;
+  } catch {
+    try {
+      const textPayload = await response.text();
+      if (textPayload.trim().length > 0) {
+        return textPayload.trim();
+      }
+    } catch {
+      return fallback;
+    }
+
+    return fallback;
+  }
+}
+
 function validateSsePayload(eventName: string, rawData: string): string {
   const parsedPayload = JSON.parse(rawData) as unknown;
 
@@ -161,8 +195,9 @@ export async function POST(request: NextRequest) {
   }
 
   if (!upstreamResponse.ok) {
+    const errorMessage = await extractUpstreamError(upstreamResponse);
     return NextResponse.json(
-      { error: `Runtime backend returned HTTP ${upstreamResponse.status}.` },
+      { error: errorMessage },
       { status: upstreamResponse.status },
     );
   }
