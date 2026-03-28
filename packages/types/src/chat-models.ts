@@ -17,7 +17,7 @@ export const TRACE_WINDOW_STEP = 18;
 const IMPORTANT_EVENTS = new Set<TraceEventType>(["thinking", "tool_call", "waiting", "done"]);
 
 const DEFAULT_ASSISTANT_MESSAGE =
-  "Xin chào, tôi là Glass Box Chat. Hãy gửi câu hỏi, backend sẽ xử lý pipeline và truyền trace events qua SSE.";
+  "Hello, I am Glass Box Chat. Send a prompt and the backend will process the pipeline and stream trace events over SSE.";
 
 export type TraceSessionSection = {
   sessionId: string;
@@ -71,7 +71,7 @@ export class ChatMessageModel {
   }
 
   static extractFirstIssue(error: ZodError): string {
-    return error.issues[0]?.message ?? "Dữ liệu tin nhắn không hợp lệ.";
+    return error.issues[0]?.message ?? "Message data is invalid.";
   }
 
   toJSON(): ChatMessageRecord {
@@ -100,7 +100,7 @@ export class RunChatRequestModel {
   }
 
   static extractFirstIssue(error: ZodError): string {
-    return error.issues[0]?.message ?? "Yêu cầu chat không hợp lệ.";
+    return error.issues[0]?.message ?? "Chat request is invalid.";
   }
 
   get prompt(): string {
@@ -120,7 +120,7 @@ export class TraceEventModel {
       traceEventSchema.parse({
         id: "trace-bootstrap",
         event: "agent_start",
-        detail: "Runtime Trace da san sang. Cho cau hoi dau tien tu nguoi dung.",
+        detail: "Runtime trace is ready. Waiting for the first user prompt.",
         agent: "CoordinatorAgent",
         branch: "main",
         mode: "sequential",
