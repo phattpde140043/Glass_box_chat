@@ -7,11 +7,12 @@ import { consumeEventStream } from "../services/event-stream";
 import {
   assistantMessagePayloadSchema,
   streamErrorPayloadSchema,
+  type AssistantSourceDetail,
   type TraceEventRecord,
 } from "../validation/chat-schemas";
 
 type RunChatStreamHandlers = {
-  onAssistantMessage: (content: string) => void;
+  onAssistantMessage: (content: string, sources?: string[], sourceDetails?: AssistantSourceDetail[]) => void;
   onTraceEvent: (event: TraceEventRecord) => void;
 };
 
@@ -72,7 +73,7 @@ export async function runChatStream(prompt: string, handlers: RunChatStreamHandl
 
       if (event === "done") {
         const assistantPayload = assistantMessagePayloadSchema.parse(parsedPayload);
-        handlers.onAssistantMessage(assistantPayload.content);
+        handlers.onAssistantMessage(assistantPayload.content, assistantPayload.sources, assistantPayload.sourceDetails);
         return;
       }
 

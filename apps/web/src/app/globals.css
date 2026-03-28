@@ -153,6 +153,42 @@ a {
   color: var(--muted);
 }
 
+.message-sources {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--panel-border);
+  font-size: 0.82rem;
+  color: var(--muted);
+  display: grid;
+  gap: 6px;
+}
+
+.message-source-list {
+  display: grid;
+  gap: 4px;
+}
+
+.message-source-list a {
+  display: block;
+  color: var(--branch-b);
+  text-decoration: underline;
+  text-decoration-color: rgba(27, 109, 122, 0.35);
+  word-break: break-all;
+}
+
+.message-source-list a:hover {
+  color: var(--text);
+}
+
+.message-source-meta {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-decoration: none;
+  font-style: italic;
+}
+
 .trace-panel {
   min-height: 0;
   display: grid;

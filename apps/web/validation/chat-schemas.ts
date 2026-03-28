@@ -13,6 +13,7 @@ export {
   traceEventTypeSchema,
   traceModeSchema,
   type AgentStatus,
+  type AssistantSourceDetail,
   type ChatMessageRecord,
   type MessageRole,
   type RunChatRequestRecord,

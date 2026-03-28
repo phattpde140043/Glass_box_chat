@@ -258,8 +258,14 @@ export function useChatRuntime() {
 
     try {
       await runChatStream(request.prompt, {
-        onAssistantMessage: (content) => {
-          setMessages((previousMessages) => [...previousMessages, ChatMessageModel.assistant(content).toJSON()]);
+        onAssistantMessage: (content, sources, sourceDetails) => {
+          setMessages((previousMessages) => [
+            ...previousMessages,
+            ChatMessageModel.assistant(content, undefined, {
+              sourceDetails,
+              sources,
+            }).toJSON(),
+          ]);
         },
         onTraceEvent: (event) => {
           appendTraceEvent(event);

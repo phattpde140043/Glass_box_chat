@@ -32,10 +32,18 @@ export const runChatRequestSchema = z.object({
   prompt: chatPromptSchema,
 });
 
+export const assistantSourceDetailSchema = z.object({
+  title: z.string().trim().min(1),
+  url: z.string().trim().url(),
+  freshness: z.string().trim().min(1).optional(),
+});
+
 export const chatMessageSchema = z.object({
   id: z.string().min(1),
   role: messageRoleSchema,
   content: z.string().trim().min(1, "Message content is invalid."),
+  sources: z.array(z.string().trim().url()).optional(),
+  sourceDetails: z.array(assistantSourceDetailSchema).optional(),
 });
 
 export const traceEventSchema = z.object({
@@ -55,6 +63,8 @@ export const traceEventListSchema = z.array(traceEventSchema);
 export const assistantMessagePayloadSchema = z.object({
   type: z.literal(chatContract.assistantPayloadType),
   content: z.string().trim().min(1),
+  sources: z.array(z.string().trim().url()).optional(),
+  sourceDetails: z.array(assistantSourceDetailSchema).optional(),
 });
 
 export const streamErrorPayloadSchema = z.object({
@@ -62,6 +72,7 @@ export const streamErrorPayloadSchema = z.object({
 });
 
 export type AgentStatus = z.infer<typeof agentStatusSchema>;
+export type AssistantSourceDetail = z.infer<typeof assistantSourceDetailSchema>;
 export type ChatMessageRecord = z.infer<typeof chatMessageSchema>;
 export type MessageRole = z.infer<typeof messageRoleSchema>;
 export type RunChatRequestRecord = z.infer<typeof runChatRequestSchema>;
