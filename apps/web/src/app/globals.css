@@ -664,6 +664,32 @@ a {
   font-weight: 600;
 }
 
+.route-state-card-error {
+  max-width: 620px;
+}
+
+.route-state-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.route-state-button {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 16px;
+  color: #fff;
+  background: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.route-state-digest {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
 @keyframes route-state-spin {
   from {
     transform: rotate(0deg);
