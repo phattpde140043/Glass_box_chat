@@ -1,0 +1,19 @@
+{
+  "chatPrompt": {
+    "minLength": 1,
+    "maxLength": 2000
+  },
+  "messageRoles": ["user", "assistant"],
+  "traceEventTypes": [
+    "agent_start",
+    "thinking",
+    "tool_call",
+    "tool_result",
+    "waiting",
+    "done"
+  ],
+  "traceBranches": ["main", "A", "B", "C"],
+  "traceModes": ["parallel", "sequential"],
+  "agentStatuses": ["running", "waiting_user", "done"],
+  "assistantPayloadType": "assistant_message"
+}
