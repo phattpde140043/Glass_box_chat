@@ -1,5 +1,3 @@
-"use server";
-
 import { RunChatRequestModel } from "../models/chat-run-request";
 import { TraceEventModel } from "../models/trace-event";
 import { fetchWithRequestLog } from "../services/api-client";
@@ -7,12 +5,15 @@ import { consumeEventStream } from "../services/event-stream";
 import {
   assistantMessagePayloadSchema,
   streamErrorPayloadSchema,
-  type AssistantSourceDetail,
   type TraceEventRecord,
 } from "../validation/chat-schemas";
 
 type RunChatStreamHandlers = {
-  onAssistantMessage: (content: string, sources?: string[], sourceDetails?: AssistantSourceDetail[]) => void;
+  onAssistantMessage: (
+    content: string,
+    sources?: string[],
+    sourceDetails?: Array<{ title: string; url: string; freshness: string }>,
+  ) => void;
   onTraceEvent: (event: TraceEventRecord) => void;
 };
 
@@ -25,22 +26,20 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
 
-  return "An unknown error occurred while communicating with the API.";
+  return "Đã xảy ra lỗi không xác định khi giao tiếp với API.";
 }
 
 async function extractRouteError(response: Response): Promise<string> {
-  const fallbackMessage = `Internal API returned HTTP ${response.status}.`;
-
   try {
     const payload = (await response.json()) as RouteErrorPayload;
     if (typeof payload.error === "string" && payload.error.trim().length > 0) {
       return payload.error;
     }
   } catch {
-    return fallbackMessage;
+    return `API nội bộ trả về lỗi HTTP ${response.status}.`;
   }
 
-  return fallbackMessage;
+  return `API nội bộ trả về lỗi HTTP ${response.status}.`;
 }
 
 export async function runChatStream(prompt: string, handlers: RunChatStreamHandlers): Promise<void> {
@@ -59,7 +58,7 @@ export async function runChatStream(prompt: string, handlers: RunChatStreamHandl
   }
 
   if (!response.body) {
-    throw new Error("No response stream was returned by the internal API.");
+    throw new Error("Không nhận được stream phản hồi từ API nội bộ.");
   }
 
   await consumeEventStream(response.body, {
@@ -82,7 +81,7 @@ export async function runChatStream(prompt: string, handlers: RunChatStreamHandl
         throw new Error(errorPayload.error);
       }
 
-      throw new Error(`Received unsupported SSE event type: ${event}`);
+      throw new Error(`Nhận được loại SSE event không hỗ trợ: ${event}`);
     },
   }).catch((error) => {
     throw new Error(toErrorMessage(error));
