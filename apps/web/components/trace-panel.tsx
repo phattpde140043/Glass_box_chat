@@ -80,12 +80,12 @@ export function TracePanel({
             className="trace-load-more"
             onClick={() => setVisibleTraceCount((previousCount) => Math.min(totalTraceCount, previousCount + TRACE_WINDOW_STEP))}
           >
-            Load {Math.min(hiddenTraceCount, TRACE_WINDOW_STEP)} older events
+            Tải thêm {Math.min(hiddenTraceCount, TRACE_WINDOW_STEP)} event cũ hơn
           </button>
         ) : null}
 
         {groupedVisibleTraceSessions.length === 0 ? (
-          <div className="trace-session-collapsed">No trace events for this session yet.</div>
+          <div className="trace-session-collapsed">Chưa có trace event nào cho phiên hiện tại.</div>
         ) : null}
 
         {groupedVisibleTraceSessions.map((section) => {
@@ -114,8 +114,8 @@ export function TracePanel({
                             className="trace-supporting-toggle"
                             onClick={() => onToggleSupportingEvents(section.sessionId)}
                           >
-                            <span>{showSupporting ? "Hide" : "Show"} supporting events</span>
-                            <span>{supporting.length} supporting events</span>
+                            <span>{showSupporting ? "Ẩn" : "Hiện"} supporting events</span>
+                            <span>{supporting.length} event phụ</span>
                           </button>
                         ) : null}
 
@@ -137,16 +137,40 @@ export function TracePanel({
                                     <time className="trace-time">{event.createdAt}</time>
                                   </header>
 
-                                  {(dag.nodeId || dag.skill || dag.deps || dag.score || dag.durationMs || dag.attempts) ? (
+                                  {(dag.nodeId || dag.skill || dag.deps || dag.score || dag.durationMs || dag.attempts || dag.provider) ? (
                                     <div className="trace-dag-badges">
                                       {dag.nodeId ? <span className="trace-chip">Node {dag.nodeId}</span> : null}
                                       {dag.skill ? <span className="trace-chip">Skill {dag.skill}</span> : null}
                                       {dag.deps ? <span className="trace-chip">Deps {dag.deps}</span> : null}
                                       {dag.score ? <span className="trace-chip emphasis">Score {dag.score}</span> : null}
+                                      {dag.provider ? <span className="trace-chip">Provider {dag.provider}</span> : null}
+                                      {dag.freshness ? <span className="trace-chip">Freshness {dag.freshness}</span> : null}
+                                      {dag.sourceCount ? <span className="trace-chip">Sources {dag.sourceCount}</span> : null}
+                                      {dag.citationCount ? <span className="trace-chip">Citations {dag.citationCount}</span> : null}
+                                      {dag.fallbackUsed === "true" ? <span className="trace-chip warn">Fallback search</span> : null}
                                       {dag.cacheHit ? <span className="trace-chip">Cache {dag.cacheHit}</span> : null}
                                       {dag.durationMs ? <span className="trace-chip">{dag.durationMs} ms</span> : null}
                                       {dag.attempts ? <span className="trace-chip">Attempt {dag.attempts}</span> : null}
                                       {dag.success ? <span className={`trace-chip ${dag.success === "true" ? "ok" : "warn"}`}>Success {dag.success}</span> : null}
+                                    </div>
+                                  ) : null}
+
+                                  {dag.citations && dag.citations.length > 0 ? (
+                                    <div className="trace-citation-block">
+                                      <strong>Nguon:</strong>
+                                      <div className="trace-citation-list">
+                                        {dag.citations.map((citation) => (
+                                          <a
+                                            key={citation}
+                                            className="trace-citation-link"
+                                            href={citation}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                          >
+                                            {citation}
+                                          </a>
+                                        ))}
+                                      </div>
                                     </div>
                                   ) : null}
 
@@ -163,7 +187,7 @@ export function TracePanel({
                   })()}
                 </div>
               ) : (
-                <div className="trace-session-collapsed">This session is collapsed to keep the trace panel compact.</div>
+                <div className="trace-session-collapsed">Session này đang được nén để giữ panel trace gọn hơn.</div>
               )}
             </section>
           );
@@ -175,8 +199,8 @@ export function TracePanel({
           type="button"
           className="trace-scroll-latest"
           onClick={onScrollToLatest}
-          aria-label="Scroll to latest event"
-          title="Scroll to latest event"
+          aria-label="Cuộn xuống event mới nhất"
+          title="Cuộn xuống event mới nhất"
         >
           ↓
         </button>
@@ -190,22 +214,35 @@ type ParsedDagDetail = {
   skill?: string;
   deps?: string;
   score?: string;
+  provider?: string;
+  sourceCount?: string;
+  citationCount?: string;
+  freshness?: string;
+  fallbackUsed?: string;
   cacheHit?: string;
   durationMs?: string;
   attempts?: string;
   success?: string;
+  citations?: string[];
 };
 
 function parseDagDetail(detail: string): ParsedDagDetail {
   const read = (label: string) => detail.match(new RegExp(`${label}=([^\\s]+)`))?.[1];
+  const citationRaw = read("citations");
   return {
     nodeId: read("node") ?? read("node_id"),
     skill: read("skill"),
     deps: read("deps"),
     score: read("score"),
+    provider: read("provider"),
+    sourceCount: read("source_count"),
+    citationCount: read("citation_count"),
+    freshness: read("freshness"),
+    fallbackUsed: read("fallback_used"),
     cacheHit: read("cache_hit"),
     durationMs: read("duration_ms"),
     attempts: read("attempts"),
     success: read("success"),
+    citations: citationRaw && citationRaw !== "none" ? citationRaw.split(",").filter(Boolean) : undefined,
   };
 }

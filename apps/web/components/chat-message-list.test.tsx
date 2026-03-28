@@ -28,7 +28,7 @@ describe("ChatMessageList", () => {
     );
 
     expect(screen.getByText("Da Nang weather snapshot")).toBeInTheDocument();
-    expect(screen.getByText("today")).toBeInTheDocument();
+    expect(screen.getByText("weather.example.local | today")).toBeInTheDocument();
     expect(screen.queryByText("https://fallback.example.local/only-url")).not.toBeInTheDocument();
   });
 

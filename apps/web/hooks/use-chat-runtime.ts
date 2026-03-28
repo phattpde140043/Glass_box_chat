@@ -1,24 +1,30 @@
-"use client";
-
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type UIEvent } from "react";
 import { runChatStream } from "../actions/chat-stream-action";
-import { traceStorage } from "../lib/trace-storage";
 import { ChatMessageModel, initialAssistantMessage } from "../models/chat-message";
 import { RunChatRequestModel } from "../models/chat-run-request";
-import { INITIAL_TRACE_WINDOW, TRACE_WINDOW_STEP, TraceEventModel } from "../models/trace-event";
-import type { RuntimeMetrics } from "../models/runtime-metrics";
+import {
+  INITIAL_TRACE_WINDOW,
+  TRACE_WINDOW_STEP,
+  TraceEventModel,
+} from "../models/trace-event";
+import { traceStorage } from "../lib/trace-storage";
 import { loadRuntimeHistory, loadRuntimeMetrics } from "../services/runtime-history";
 import { useTraceStore } from "../store/trace-store";
-import type { AgentStatus, ChatMessageRecord, TraceEventRecord } from "../validation/chat-schemas";
+import type { RuntimeMetrics } from "../models/runtime-metrics";
+import type {
+  AgentStatus,
+  ChatMessageRecord,
+  TraceEventRecord,
+} from "../validation/chat-schemas";
 
 const INPUT_MAX_LENGTH = 2000;
 
 function buildRequestFailureMessage(error: unknown): string {
   if (error instanceof Error) {
-    return `Failed to send the request to the backend. Error: ${error.message}. Please verify the API is running on port 8000.`;
+    return `Không gửi được yêu cầu tới backend. Lỗi: ${error.message}. Vui lòng kiểm tra API đang chạy ở cổng 8000.`;
   }
 
-  return "Failed to send the request to the backend. Please verify the API is running on port 8000.";
+  return "Không gửi được yêu cầu tới backend. Vui lòng kiểm tra API đang chạy ở cổng 8000.";
 }
 
 function mergeTraceEvents(...eventGroups: TraceEventRecord[][]): TraceEventRecord[] {
@@ -216,7 +222,7 @@ export function useChatRuntime() {
     setShowScrollToLatest(!isNearBottom);
 
     if (element.scrollTop <= 24 && hiddenTraceCount > 0) {
-      setVisibleTraceCount((previousCount: number) => Math.min(traceEvents.length, previousCount + TRACE_WINDOW_STEP));
+      setVisibleTraceCount((previousCount) => Math.min(traceEvents.length, previousCount + TRACE_WINDOW_STEP));
     }
   };
 
@@ -261,10 +267,7 @@ export function useChatRuntime() {
         onAssistantMessage: (content, sources, sourceDetails) => {
           setMessages((previousMessages) => [
             ...previousMessages,
-            ChatMessageModel.assistant(content, undefined, {
-              sourceDetails,
-              sources,
-            }).toJSON(),
+            ChatMessageModel.assistant(content, undefined, sources, sourceDetails).toJSON(),
           ]);
         },
         onTraceEvent: (event) => {
@@ -274,10 +277,9 @@ export function useChatRuntime() {
       });
 
       try {
-        const latestMetrics = await loadRuntimeMetrics();
-        setRuntimeMetrics(latestMetrics);
+        setRuntimeMetrics(await loadRuntimeMetrics());
       } catch {
-        // Keep this non-blocking because chat completion must not fail on metrics refresh.
+        // Non-blocking metrics refresh.
       }
 
       setAgentStatus("done");
