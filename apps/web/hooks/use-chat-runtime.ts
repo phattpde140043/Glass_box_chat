@@ -6,7 +6,8 @@ import { traceStorage } from "../lib/trace-storage";
 import { ChatMessageModel, initialAssistantMessage } from "../models/chat-message";
 import { RunChatRequestModel } from "../models/chat-run-request";
 import { INITIAL_TRACE_WINDOW, TRACE_WINDOW_STEP, TraceEventModel } from "../models/trace-event";
-import { loadRuntimeHistory } from "../services/runtime-history";
+import type { RuntimeMetrics } from "../models/runtime-metrics";
+import { loadRuntimeHistory, loadRuntimeMetrics } from "../services/runtime-history";
 import { useTraceStore } from "../store/trace-store";
 import type { AgentStatus, ChatMessageRecord, TraceEventRecord } from "../validation/chat-schemas";
 
@@ -93,9 +94,11 @@ export function useChatRuntime() {
     hydrateTrace: hydrateTraceState,
     resetSessionExpansionsForSession,
     setHasHydratedTrace,
+    setRuntimeMetrics,
     setShouldStickToBottom,
     setShowScrollToLatest,
     setVisibleTraceCount,
+    runtimeMetrics,
     shouldStickToBottom,
     showScrollToLatest,
     toggleSession,
@@ -120,11 +123,18 @@ export function useChatRuntime() {
     const hydrateTraceFromDb = async () => {
       let backendEvents = [] as typeof traceEvents;
       let persistedEvents = [] as typeof traceEvents;
+      let metrics = null as RuntimeMetrics | null;
 
       try {
         backendEvents = await loadRuntimeHistory();
       } catch {
         backendEvents = [];
+      }
+
+      try {
+        metrics = await loadRuntimeMetrics();
+      } catch {
+        metrics = null;
       }
 
       try {
@@ -135,9 +145,15 @@ export function useChatRuntime() {
 
         const mergedEvents = mergeTraceEvents(backendEvents, persistedEvents);
         hydrateTraceState(mergedEvents);
+        if (metrics) {
+          setRuntimeMetrics(metrics);
+        }
       } catch {
         if (isMounted) {
           hydrateTraceState(backendEvents);
+          if (metrics) {
+            setRuntimeMetrics(metrics);
+          }
         }
       } finally {
         if (isMounted) {
@@ -294,6 +310,7 @@ export function useChatRuntime() {
     scrollTraceToBottom,
     setVisibleTraceCount,
     showScrollToLatest,
+    runtimeMetrics,
     toggleSession,
     toggleSupportingEvents,
     traceEvents,

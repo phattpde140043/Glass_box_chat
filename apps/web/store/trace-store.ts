@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { EMPTY_RUNTIME_METRICS, type RuntimeMetrics } from "../models/runtime-metrics";
 import { INITIAL_TRACE_WINDOW, TraceEventModel } from "../models/trace-event";
 import type { TraceEventRecord } from "../validation/chat-schemas";
 
@@ -9,6 +10,7 @@ type TraceState = {
   shouldStickToBottom: boolean;
   showScrollToLatest: boolean;
   traceEvents: TraceEventRecord[];
+  runtimeMetrics: RuntimeMetrics;
   visibleTraceCount: number;
 };
 
@@ -17,6 +19,7 @@ type TraceActions = {
   hydrateTrace: (events: TraceEventRecord[]) => void;
   resetSessionExpansionsForSession: (sessionId: string) => void;
   setHasHydratedTrace: (value: boolean) => void;
+  setRuntimeMetrics: (value: RuntimeMetrics) => void;
   setShouldStickToBottom: (value: boolean) => void;
   setShowScrollToLatest: (value: boolean) => void;
   setVisibleTraceCount: (updater: ((previous: number) => number) | number) => void;
@@ -35,6 +38,7 @@ export const useTraceStore = create<TraceStore>((set) => ({
   shouldStickToBottom: true,
   showScrollToLatest: false,
   traceEvents: [bootstrapTrace],
+  runtimeMetrics: EMPTY_RUNTIME_METRICS,
   visibleTraceCount: INITIAL_TRACE_WINDOW,
 
   appendTraceEvent: (event) =>
@@ -70,6 +74,7 @@ export const useTraceStore = create<TraceStore>((set) => ({
     })),
 
   setHasHydratedTrace: (value) => set(() => ({ hasHydratedTrace: value })),
+  setRuntimeMetrics: (value) => set(() => ({ runtimeMetrics: value })),
   setShouldStickToBottom: (value) => set(() => ({ shouldStickToBottom: value })),
   setShowScrollToLatest: (value) => set(() => ({ showScrollToLatest: value })),
 

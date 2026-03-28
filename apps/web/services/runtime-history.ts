@@ -1,4 +1,5 @@
 import { TraceEventModel } from "../models/trace-event";
+import { EMPTY_RUNTIME_METRICS, type RuntimeMetrics } from "../models/runtime-metrics";
 import { fetchWithRequestLog } from "./api-client";
 import type { TraceEventRecord } from "../validation/chat-schemas";
 
@@ -17,6 +18,8 @@ type RuntimeSessionEventItem = {
 type RuntimeSessionEventsResponse = {
   items: RuntimeSessionEventItem[];
 };
+
+type RuntimeMetricsResponse = RuntimeMetrics;
 
 function buildBackendUrl(path: string): string {
   const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || "http://localhost:8000";
@@ -87,4 +90,22 @@ export async function loadRuntimeHistory(sessionLimit = 5): Promise<TraceEventRe
   );
 
   return dedupeTraceEvents(eventResponses.flat());
+}
+
+export async function loadRuntimeMetrics(): Promise<RuntimeMetrics> {
+  const response = await fetchWithRequestLog(buildBackendUrl("/runtime/metrics"), {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    return EMPTY_RUNTIME_METRICS;
+  }
+
+  const payload = (await response.json()) as Partial<RuntimeMetricsResponse>;
+
+  return {
+    ...EMPTY_RUNTIME_METRICS,
+    ...payload,
+    breaker_states: payload.breaker_states ?? {},
+  };
 }
