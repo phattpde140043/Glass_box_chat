@@ -1,0 +1,63 @@
+from typing import Any, Protocol
+
+
+class HealthRepository(Protocol):
+    def get_database_path(self) -> Any: ...
+
+
+class SessionQueryRepository(Protocol):
+    def list_sessions(self, limit: int) -> list[dict[str, str | None]]: ...
+
+    def list_tasks_by_session(self, session_id: str) -> list[dict[str, str | int | None]]: ...
+
+    def list_events_by_session(self, session_id: str, limit: int, offset: int) -> list[dict[str, str | None]]: ...
+
+    def count_tasks_by_session(self, session_id: str) -> int: ...
+
+    def count_events_by_session(self, session_id: str) -> int: ...
+
+
+class RunRepository(Protocol):
+    def count_sessions(self) -> int: ...
+
+    def create_session(self, session_id: str, label: str) -> None: ...
+
+    def create_root_task(self, task_id: str, session_id: str, prompt: str) -> None: ...
+
+    def transition_task(self, task_id: str, target_status: str) -> None: ...
+
+    def complete_task(self, task_id: str, status: str, last_error: str | None = None) -> None: ...
+
+    def get_task_status(self, task_id: str) -> str | None: ...
+
+    def complete_session(self, session_id: str, status: str) -> None: ...
+
+    def append_event(
+        self,
+        event_id: str,
+        session_id: str,
+        task_id: str | None,
+        agent_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None: ...
+
+    def create_waiting_task(self, task_id: str, session_id: str, agent_id: str, question: str) -> None: ...
+
+
+class HitlRepository(Protocol):
+    def get_waiting_task_by_agent(self, agent_id: str) -> dict[str, str] | None: ...
+
+    def resolve_waiting_task(self, task_id: str, answer: str) -> None: ...
+
+    def transition_task(self, task_id: str, target_status: str) -> None: ...
+
+    def append_event(
+        self,
+        event_id: str,
+        session_id: str,
+        task_id: str | None,
+        agent_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None: ...
