@@ -567,6 +567,77 @@ a {
   opacity: 0.5;
 }
 
+.route-state-page {
+  min-height: 100vh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+}
+
+.route-state-card {
+  width: min(540px, 100%);
+  padding: 32px;
+  border-radius: 24px;
+  background: rgba(255, 252, 247, 0.88);
+  border: 1px solid var(--panel-border);
+  box-shadow: 0 20px 60px rgba(22, 32, 51, 0.1);
+  display: grid;
+  gap: 14px;
+  text-align: center;
+}
+
+.route-state-card h1 {
+  margin: 0;
+  font-size: clamp(1.4rem, 2.5vw, 2rem);
+}
+
+.route-state-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.route-state-kicker {
+  justify-self: center;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: rgba(216, 95, 59, 0.12);
+}
+
+.route-state-spinner {
+  width: 44px;
+  height: 44px;
+  margin: 4px auto;
+  border-radius: 999px;
+  border: 3px solid rgba(46, 58, 89, 0.16);
+  border-top-color: var(--accent);
+  animation: route-state-spin 0.9s linear infinite;
+}
+
+.route-state-link {
+  justify-self: center;
+  border-radius: 999px;
+  padding: 10px 16px;
+  color: #fff;
+  background: var(--accent);
+  font-weight: 600;
+}
+
+@keyframes route-state-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 960px) {
   .chat-shell {
     height: min(92vh, 960px);
