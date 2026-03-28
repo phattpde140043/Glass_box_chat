@@ -267,6 +267,13 @@ export function useChatRuntime() {
         },
       });
 
+      try {
+        const latestMetrics = await loadRuntimeMetrics();
+        setRuntimeMetrics(latestMetrics);
+      } catch {
+        // Keep this non-blocking because chat completion must not fail on metrics refresh.
+      }
+
       setAgentStatus("done");
     } catch (error) {
       setMessages((previousMessages) => [
