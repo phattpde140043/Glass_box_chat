@@ -5,6 +5,8 @@ export type RuntimeStatus = {
   checkedAt: string | null;
 };
 
+const REQUEST_TIMEOUT_MS = 5000;
+
 function normalizeStatus(value: unknown): RuntimeStatus["status"] {
   if (value === "ok" || value === "degraded" || value === "offline") {
     return value;
@@ -14,9 +16,26 @@ function normalizeStatus(value: unknown): RuntimeStatus["status"] {
 }
 
 export async function loadRuntimeStatus(): Promise<RuntimeStatus> {
-  const response = await fetch("/api/chat/health", {
-    cache: "no-store",
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response: Response;
+
+  try {
+    response = await fetch("/api/chat/health", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch {
+    return {
+      status: "offline",
+      backendReachable: false,
+      backendStatusCode: null,
+      checkedAt: new Date().toISOString(),
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     return {
@@ -27,7 +46,13 @@ export async function loadRuntimeStatus(): Promise<RuntimeStatus> {
     };
   }
 
-  const payload = (await response.json()) as Partial<RuntimeStatus>;
+  let payload: Partial<RuntimeStatus> = {};
+
+  try {
+    payload = (await response.json()) as Partial<RuntimeStatus>;
+  } catch {
+    payload = {};
+  }
 
   return {
     status: normalizeStatus(payload.status),
