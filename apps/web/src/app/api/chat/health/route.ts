@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+const HEALTH_TIMEOUT_MS = 3000;
 
 function buildBackendUrl(path: string): string {
   const baseUrl =
@@ -10,10 +11,14 @@ function buildBackendUrl(path: string): string {
 }
 
 export async function GET() {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+
   try {
     const response = await fetch(buildBackendUrl("/health"), {
       method: "GET",
       cache: "no-store",
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -45,5 +50,7 @@ export async function GET() {
       },
       { status: 200 },
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
