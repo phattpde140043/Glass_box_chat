@@ -1,5 +1,6 @@
 import { ZodError } from "zod";
 import {
+  type AssistantSourceDetail,
   chatMessageSchema,
   runChatRequestSchema,
   traceEventListSchema,
@@ -28,12 +29,21 @@ export type TraceSessionSection = {
 export class ChatMessageModel {
   private constructor(private readonly value: ChatMessageRecord) {}
 
-  static assistant(content: string, id = `assistant-${crypto.randomUUID()}`): ChatMessageModel {
+  static assistant(
+    content: string,
+    id = `assistant-${crypto.randomUUID()}`,
+    options?: {
+      sources?: string[];
+      sourceDetails?: AssistantSourceDetail[];
+    },
+  ): ChatMessageModel {
     return new ChatMessageModel(
       chatMessageSchema.parse({
         id,
         role: "assistant",
         content,
+        sources: options?.sources,
+        sourceDetails: options?.sourceDetails,
       }),
     );
   }
