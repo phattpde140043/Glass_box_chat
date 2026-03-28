@@ -19,7 +19,17 @@ export async function loadRuntimeHealth(): Promise<RuntimeHealth> {
     };
   }
 
-  const payload = (await response.json()) as Partial<RuntimeHealth>;
+  let payload: Partial<RuntimeHealth> = {};
+
+  try {
+    payload = (await response.json()) as Partial<RuntimeHealth>;
+  } catch {
+    return {
+      status: "offline",
+      backendReachable: false,
+      backendStatusCode: null,
+    };
+  }
 
   return {
     status: payload.status === "ok" || payload.status === "degraded" || payload.status === "offline" ? payload.status : "offline",
