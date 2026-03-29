@@ -10,6 +10,7 @@ def build_trace_payload(
     agent: str,
     session_id: str,
     session_label: str,
+    message_id: str,
     branch: str = "main",
     mode: str = "sequential",
 ) -> dict[str, str]:
@@ -24,4 +25,5 @@ def build_trace_payload(
         "createdAt": now_hms(),
         "sessionId": session_id,
         "sessionLabel": session_label,
+        "messageId": message_id,
     }

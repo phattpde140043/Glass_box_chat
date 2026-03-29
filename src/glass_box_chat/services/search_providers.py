@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import os
 import re
 import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
+from urllib.parse import urlparse
 
 import httpx
 
@@ -41,7 +43,272 @@ class SearchProvider(Protocol):
     async def search(self, query: str, limit: int = 5) -> SearchResultBatch: ...
 
 
+class LocationSemanticExtractor(Protocol):
+    def extract_location(self, text: str) -> str | None: ...
+
+
 SearchIntent = Literal["weather_live", "news_live", "market_live", "general_research"]
+
+_COMMODITY_SUBJECT_HINTS: dict[str, tuple[str, ...]] = {
+    "coffee": ("coffee", "cà phê", "ca phe", "cafe", "arabica", "robusta"),
+    "pepper": ("pepper", "hồ tiêu", "ho tieu", "black pepper"),
+    "commodity": ("commodity", "commodities", "nông sản", "nong san", "market"),
+}
+
+_OFFICIAL_COMMODITY_DOMAINS: dict[str, tuple[str, ...]] = {
+    "coffee": ("ico.org", "fas.usda.gov", "fao.org", "worldbank.org"),
+    "pepper": ("fao.org", "worldbank.org"),
+    "commodity": ("worldbank.org", "fao.org", "usda.gov"),
+}
+
+_AGGREGATE_SOURCE_HINTS = (
+    "news",
+    "digest",
+    "latest",
+    "summary",
+    "roundup",
+    "analysis",
+    "opinion",
+    "blog",
+)
+
+_SOURCE_TIER_SCORES: dict[str, float] = {
+    "official_statistics": 1.0,
+    "intergovernmental_report": 0.88,
+    "major_exchange": 0.78,
+    "financial_media": 0.62,
+    "general_news": 0.45,
+    "other": 0.35,
+}
+
+_INTERGOV_DOMAINS = (
+    "worldbank.org",
+    "fao.org",
+    "usda.gov",
+    "oecd.org",
+    "imf.org",
+    "ec.europa.eu",
+)
+
+_MAJOR_EXCHANGE_DOMAINS = (
+    "ice.com",
+    "cmegroup.com",
+    "lme.com",
+)
+
+_FINANCIAL_MEDIA_DOMAINS = (
+    "reuters.com",
+    "bloomberg.com",
+    "wsj.com",
+    "ft.com",
+    "marketwatch.com",
+    "investing.com",
+)
+
+
+def _tokenize_text(text: str) -> set[str]:
+    return {token for token in re.split(r"[^\wÀ-ỹ]+", text.lower()) if token}
+
+
+def detect_commodity_subject(query: str) -> str:
+    lowered = query.lower()
+    for subject, hints in _COMMODITY_SUBJECT_HINTS.items():
+        if any(hint in lowered for hint in hints):
+            return subject
+    return "commodity"
+
+
+def is_official_commodity_source(document: SearchDocument, query: str) -> bool:
+    subject = detect_commodity_subject(query)
+    haystack = f"{document.url} {document.provider} {document.title}".lower()
+    return any(domain in haystack for domain in _OFFICIAL_COMMODITY_DOMAINS.get(subject, ()))
+
+
+def _extract_domain(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    netloc = (parsed.netloc or "").lower()
+    if netloc.startswith("www."):
+        return netloc[4:]
+    return netloc
+
+
+def classify_source_tier(document: SearchDocument, query: str) -> str:
+    haystack = f"{document.provider} {document.title} {document.url}".lower()
+    domain = _extract_domain(document.url)
+    provider = (document.provider or "").lower()
+
+    if is_official_commodity_source(document, query):
+        return "official_statistics"
+    if any(domain.endswith(suffix) for suffix in _INTERGOV_DOMAINS):
+        return "intergovernmental_report"
+    if any(domain.endswith(suffix) for suffix in _MAJOR_EXCHANGE_DOMAINS):
+        return "major_exchange"
+    if any(domain.endswith(suffix) for suffix in _FINANCIAL_MEDIA_DOMAINS):
+        return "financial_media"
+    if provider in ("newsapi", "serpapi") or any(token in haystack for token in ("news", "headline", "digest")):
+        return "general_news"
+    return "other"
+
+
+def _published_recency_decay(published_at: str | None, freshness: str) -> float:
+    if not published_at:
+        freshness_map = {"live": 1.0, "latest": 0.95, "today": 0.97, "recent": 0.9}
+        return freshness_map.get((freshness or "").lower(), 0.86)
+
+    raw = published_at.strip()
+    if not raw:
+        return 0.86
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        published_dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            published_dt = datetime.fromisoformat(f"{raw}T00:00:00")
+        except ValueError:
+            return 0.86
+
+    if published_dt.tzinfo is None:
+        published_dt = published_dt.replace(tzinfo=UTC)
+    now = datetime.now(tz=UTC)
+    age_days = max(0.0, (now - published_dt).total_seconds() / 86400.0)
+
+    if age_days <= 1:
+        return 1.0
+    if age_days <= 7:
+        return 0.97
+    if age_days <= 30:
+        return 0.9
+    if age_days <= 90:
+        return 0.78
+    if age_days <= 180:
+        return 0.66
+    return 0.55
+
+
+def _source_group_key(document: SearchDocument) -> str:
+    domain = _extract_domain(document.url)
+    if domain:
+        parts = domain.split(".")
+        if len(parts) >= 2:
+            return ".".join(parts[-2:])
+        return domain
+    provider = (document.provider or "").strip().lower()
+    return provider or "unknown"
+
+
+def _title_signature(title: str) -> str:
+    tokens = sorted(_tokenize_text(title))
+    return " ".join(tokens[:8])
+
+
+def _token_jaccard(a: str, b: str) -> float:
+    a_tokens = _tokenize_text(a)
+    b_tokens = _tokenize_text(b)
+    if not a_tokens or not b_tokens:
+        return 0.0
+    intersection = len(a_tokens & b_tokens)
+    union = len(a_tokens | b_tokens)
+    if union == 0:
+        return 0.0
+    return intersection / union
+
+
+def score_document_relevance(document: SearchDocument, query: str) -> float:
+    query_tokens = _tokenize_text(query)
+    doc_tokens = _tokenize_text(f"{document.title} {document.snippet} {document.url} {document.provider}")
+    overlap = len(query_tokens & doc_tokens)
+    title_overlap = len(query_tokens & _tokenize_text(document.title))
+    subject = detect_commodity_subject(query)
+    subject_hits = sum(1 for hint in _COMMODITY_SUBJECT_HINTS.get(subject, ()) if hint in f"{document.title} {document.snippet}".lower())
+    aggregate_penalty = 0.18 if any(token in f"{document.title} {document.provider} {document.url}".lower() for token in _AGGREGATE_SOURCE_HINTS) else 0.0
+    tier = classify_source_tier(document, query)
+    tier_score = _SOURCE_TIER_SCORES.get(tier, _SOURCE_TIER_SCORES["other"])
+    official_bonus = 0.2 if tier == "official_statistics" else 0.0
+    provider_bonus = 0.1 if document.provider == "commodity_refs" else 0.0
+    freshness_bonus = 0.08 if document.freshness == "live" else 0.0
+    recency_decay = _published_recency_decay(document.published_at, document.freshness)
+
+    raw_score = (
+        document.reliability * 0.55
+        + tier_score * 0.6
+        + overlap * 0.05
+        + title_overlap * 0.08
+        + subject_hits * 0.07
+        + freshness_bonus
+        + official_bonus
+        + provider_bonus
+        - aggregate_penalty
+    )
+    return round(max(0.0, min(2.5, raw_score * recency_decay)), 4)
+
+
+def rank_documents_for_query(query: str, documents: list[SearchDocument], limit: int | None = None) -> list[SearchDocument]:
+    ranked = sorted(
+        documents,
+        key=lambda document: (
+            score_document_relevance(document, query),
+            document.reliability,
+            1 if document.freshness == "live" else 0,
+        ),
+        reverse=True,
+    )
+
+    selected: list[SearchDocument] = []
+    source_counts: dict[str, int] = {}
+    seen_signatures: set[str] = set()
+
+    target = len(ranked) if limit is None else min(limit, len(ranked))
+    while ranked and len(selected) < target:
+        best_index = 0
+        best_adjusted_score = -1.0
+        for index, candidate in enumerate(ranked):
+            base = score_document_relevance(candidate, query)
+            source_group = _source_group_key(candidate)
+            diversity_penalty = source_counts.get(source_group, 0) * 0.16
+            signature = _title_signature(candidate.title)
+            duplicate_penalty = 0.1 if signature in seen_signatures else 0.0
+            near_duplicate_penalty = 0.0
+            if selected:
+                near_duplicate_penalty = max(
+                    (_token_jaccard(candidate.title, picked.title) * 0.12 for picked in selected[-3:]),
+                    default=0.0,
+                )
+            adjusted = base - diversity_penalty - duplicate_penalty - near_duplicate_penalty
+            if adjusted > best_adjusted_score:
+                best_adjusted_score = adjusted
+                best_index = index
+
+        chosen = ranked.pop(best_index)
+        selected.append(chosen)
+        source_group = _source_group_key(chosen)
+        source_counts[source_group] = source_counts.get(source_group, 0) + 1
+        seen_signatures.add(_title_signature(chosen.title))
+
+    return selected
+
+
+def is_commodity_query(query: str) -> bool:
+    lowered = query.lower()
+    return any(
+        token in lowered
+        for token in (
+            "coffee",
+            "cà phê",
+            "ca phe",
+            "cafe",
+            "arabica",
+            "robusta",
+            "commodity",
+            "nông sản",
+            "nong san",
+            "pepper",
+            "hồ tiêu",
+            "ho tieu",
+        )
+    )
 
 
 def detect_search_intent(query: str) -> SearchIntent:
@@ -50,7 +317,7 @@ def detect_search_intent(query: str) -> SearchIntent:
         return "weather_live"
     if any(token in lowered for token in ("news", "tin tức", "tin tuc", "headline", "mới nhất", "moi nhat")):
         return "news_live"
-    if any(token in lowered for token in ("stock", "market", "crypto", "gia vang", "chứng khoán", "chung khoan")):
+    if any(token in lowered for token in ("stock", "market", "crypto", "gia vang", "chứng khoán", "chung khoan", "coffee", "cà phê", "ca phe", "cafe", "arabica", "robusta", "commodity", "nông sản", "nong san", "pepper")):
         return "market_live"
     return "general_research"
 
@@ -210,7 +477,7 @@ class DuckDuckGoSearchProvider:
             if len(documents) >= limit:
                 break
 
-        return documents[:limit]
+        return rank_documents_for_query(query, documents, limit=limit)
 
     def _append_related_topic_documents(self, topic: object, documents: list[SearchDocument], limit: int) -> None:
         if len(documents) >= limit or not isinstance(topic, dict):
@@ -246,9 +513,28 @@ class OpenMeteoWeatherProvider:
     """Live weather provider using Open-Meteo endpoints (no API key)."""
 
     name = "weather_open_meteo"
+    _KNOWN_CITIES = ("da nang", "ha noi", "ho chi minh", "hue", "can tho")
+    _LOCATION_TRAILING_HINTS = re.compile(
+        r"\b(?:"
+        r"ngay mai|ngày mai|hom nay|hôm nay|tomorrow|today|forecast|du bao|dự báo|"
+        r"the nao|thế nào|ra sao|la gi|là gì|suitable|phu hop|phù hợp|picnic|"
+        r"weather|thoi tiet|thời tiết|nhu the nao|như thế nào"
+        r")\b",
+        re.IGNORECASE,
+    )
 
-    def __init__(self, timeout_seconds: float = 3.0) -> None:
+    def __init__(self, timeout_seconds: float = 3.0, semantic_extractor: LocationSemanticExtractor | None = None) -> None:
         self._timeout_seconds = timeout_seconds
+        self._semantic_extractor = semantic_extractor or self._build_default_semantic_extractor()
+
+    @staticmethod
+    def _build_default_semantic_extractor() -> LocationSemanticExtractor | None:
+        enabled = os.getenv("WEATHER_ENABLE_BERT_EXTRACTOR", "false").strip().lower() in ("1", "true", "yes", "on")
+        if not enabled:
+            return None
+        model_name = os.getenv("WEATHER_BERT_MODEL", "dslim/bert-base-NER").strip() or "dslim/bert-base-NER"
+        min_score = float(os.getenv("WEATHER_BERT_MIN_SCORE", "0.5"))
+        return BERTSemanticEntityExtractor(model_name=model_name, min_score=min_score)
 
     async def search(self, query: str, limit: int = 5) -> SearchResultBatch:
         docs = await asyncio.to_thread(self._search_sync, query, limit)
@@ -417,17 +703,118 @@ class OpenMeteoWeatherProvider:
 
         return docs[:max(1, limit)]
 
+    @classmethod
+    def _clean_location_candidate(cls, candidate: str) -> str | None:
+        sanitized = re.sub(r"\s+", " ", candidate).strip(" ,?.!:;")
+        sanitized = re.sub(r"^(?:o|ở|in|tai|tại|for)\s+", "", sanitized, flags=re.IGNORECASE)
+        sanitized = cls._LOCATION_TRAILING_HINTS.split(sanitized, maxsplit=1)[0].strip(" ,?.!:;")
+        sanitized = re.sub(r"[^0-9A-Za-zÀ-ỹ\s\-'.]", " ", sanitized)
+        sanitized = re.sub(r"\s+", " ", sanitized).strip(" ,?.!:;")
+        return sanitized[:60] if sanitized else None
+
+    def _extract_location_semantically(self, query: str) -> str | None:
+        if self._semantic_extractor is None:
+            return None
+        try:
+            semantic_location = self._semantic_extractor.extract_location(query)
+        except Exception:
+            return None
+        if not semantic_location:
+            return None
+        return self._clean_location_candidate(semantic_location.lower())
+
     def _extract_location(self, query: str) -> str | None:
         lowered = query.lower()
-        for known_city in ("da nang", "ha noi", "ho chi minh", "hue", "can tho"):
+        for known_city in self._KNOWN_CITIES:
             if known_city in lowered:
                 return known_city
-        # Attempt simple phrase extraction: "weather in <location>"
-        match = re.search(r"(?:weather|thoi tiet|thời tiết)\s+(?:in|tai|tại)?\s*([a-zA-Z\s]+)", lowered)
-        if not match:
+
+        patterns = (
+            r"(?:weather\s+forecast|forecast\s+weather)\s+(?:for|in|at)\s+(.+)",
+            r"(?:weather|thoi tiet|thời tiết)\s+(?:o|ở|in|tai|tại|for|at)?\s*(.+)",
+            r"(?:du bao|dự báo|forecast)\s+(?:weather|thoi tiet|thời tiết)\s+(?:o|ở|in|tai|tại|for|at)?\s*(.+)",
+            r"(?:o|ở|in|tai|tại|for|at)\s+([0-9A-Za-zÀ-ỹ\s\-'.]+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, lowered, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = self._clean_location_candidate(match.group(1))
+            if candidate:
+                return candidate
+
+        # Semantic extraction is intentionally the last fallback because loading/using
+        # token-classification models can be expensive on cold start.
+        semantic = self._extract_location_semantically(query)
+        if semantic:
+            return semantic
+        return None
+
+
+class BERTSemanticEntityExtractor:
+    """Optional semantic extractor using a local or remotely-resolved BERT token-classification model."""
+
+    _LOCATION_LABEL_HINTS = ("LOC", "LOCATION", "GPE")
+
+    def __init__(self, model_name: str, min_score: float = 0.5) -> None:
+        self._model_name = model_name
+        self._min_score = max(0.0, min(1.0, min_score))
+        self._pipeline: object | None = None
+        self._disabled = False
+
+    def _get_pipeline(self):
+        if self._disabled:
             return None
-        candidate = re.sub(r"\s+", " ", match.group(1)).strip()
-        return candidate[:60] if candidate else None
+        if self._pipeline is not None:
+            return self._pipeline
+        try:
+            from transformers import pipeline  # type: ignore
+
+            self._pipeline = pipeline(
+                "token-classification",
+                model=self._model_name,
+                tokenizer=self._model_name,
+                aggregation_strategy="simple",
+            )
+            return self._pipeline
+        except Exception:
+            self._disabled = True
+            self._pipeline = None
+            return None
+
+    @classmethod
+    def _is_location_entity(cls, entity_group: str) -> bool:
+        normalized = entity_group.upper().replace("-", "_")
+        return any(hint in normalized for hint in cls._LOCATION_LABEL_HINTS)
+
+    def extract_location(self, text: str) -> str | None:
+        if not text.strip():
+            return None
+        token_classifier = self._get_pipeline()
+        if token_classifier is None:
+            return None
+
+        entities = token_classifier(text)
+        best_text: str | None = None
+        best_score = -1.0
+
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            entity_group = str(entity.get("entity_group") or entity.get("entity") or "")
+            if not self._is_location_entity(entity_group):
+                continue
+            score = float(entity.get("score") or 0.0)
+            if score < self._min_score:
+                continue
+            candidate = str(entity.get("word") or "").strip()
+            if not candidate:
+                continue
+            if score > best_score:
+                best_score = score
+                best_text = candidate
+
+        return best_text
 
 
 class NewsAPIProvider:
@@ -581,6 +968,137 @@ class SerpAPIProvider:
             return []
 
 
+class CommodityReferenceProvider:
+    """Direct reference fetcher for commodity/coffee market pages without API keys."""
+
+    name = "commodity_refs"
+
+    def __init__(self, timeout_seconds: float = 4.0) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    async def search(self, query: str, limit: int = 5) -> SearchResultBatch:
+        if not is_commodity_query(query):
+            return SearchResultBatch(
+                provider=self.name,
+                documents=[],
+                intent="market_live",
+                confidence=0.0,
+                providers_tried=[self.name],
+            )
+
+        docs = await asyncio.to_thread(self._search_sync, query, limit)
+        return SearchResultBatch(
+            provider=self.name,
+            documents=docs[:limit],
+            intent="market_live",
+            confidence=0.76 if docs else 0.0,
+            providers_tried=[self.name],
+        )
+
+    def _search_sync(self, query: str, limit: int) -> list[SearchDocument]:
+        subject = self._detect_subject(query)
+        references = self._reference_urls(subject)
+        documents: list[SearchDocument] = []
+
+        for title, url, reliability in references:
+            doc = self._fetch_reference(subject, title, url, reliability)
+            if doc is not None:
+                documents.append(doc)
+            if len(documents) >= limit:
+                break
+
+        return documents[:limit]
+
+    @staticmethod
+    def _detect_subject(query: str) -> str:
+        lowered = query.lower()
+        if any(token in lowered for token in ("coffee", "cà phê", "ca phe", "cafe", "arabica", "robusta")):
+            return "coffee"
+        if any(token in lowered for token in ("pepper", "hồ tiêu", "ho tieu")):
+            return "pepper"
+        return "commodity"
+
+    @staticmethod
+    def _reference_urls(subject: str) -> list[tuple[str, str, float]]:
+        common_refs = [
+            ("World Bank commodity markets", "https://www.worldbank.org/en/research/commodity-markets", 0.84),
+            ("FAO food price index", "https://www.fao.org/worldfoodsituation/foodpricesindex/en/", 0.82),
+        ]
+        if subject == "coffee":
+            return [
+                ("ICO coffee organization", "https://www.ico.org/", 0.9),
+                ("USDA coffee markets and trade", "https://www.fas.usda.gov/data/coffee-world-markets-and-trade", 0.88),
+                *common_refs,
+            ]
+        if subject == "pepper":
+            return [
+                ("FAO commodities and trade", "https://www.fao.org/markets-and-trade/en/", 0.8),
+                *common_refs,
+            ]
+        return common_refs
+
+    def _fetch_reference(self, subject: str, title: str, url: str, reliability: float) -> SearchDocument | None:
+        try:
+            response = httpx.get(
+                url,
+                timeout=self._timeout_seconds,
+                follow_redirects=True,
+                headers={"User-Agent": "GlassBoxResearch/1.0"},
+            )
+            response.raise_for_status()
+        except Exception:
+            return None
+
+        html = response.text
+        page_title = self._extract_title(html) or title
+        meta_description = self._extract_meta_description(html)
+        snippet = meta_description or self._extract_visible_text(html)
+        snippet = re.sub(r"\s+", " ", snippet).strip()
+        if not snippet:
+            snippet = f"Official {subject} market reference page."
+
+        if subject == "coffee" and "coffee" not in snippet.lower() and "cà phê" not in snippet.lower():
+            snippet = f"Official coffee market reference. {snippet}"
+        elif subject == "pepper" and "pepper" not in snippet.lower() and "tiêu" not in snippet.lower():
+            snippet = f"Official pepper market reference. {snippet}"
+        elif subject == "commodity" and "commodity" not in snippet.lower():
+            snippet = f"Official commodity market reference. {snippet}"
+
+        return SearchDocument(
+            title=page_title[:100],
+            snippet=snippet[:300],
+            url=str(response.url)[:500],
+            freshness="live",
+            reliability=reliability,
+            provider=self.name,
+        )
+
+    @staticmethod
+    def _extract_title(html: str) -> str:
+        match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return ""
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", match.group(1))).strip()
+
+    @staticmethod
+    def _extract_meta_description(html: str) -> str:
+        match = re.search(
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+            html,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        return re.sub(r"\s+", " ", match.group(1)).strip()
+
+    @staticmethod
+    def _extract_visible_text(html: str) -> str:
+        stripped = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.IGNORECASE | re.DOTALL)
+        stripped = re.sub(r"<[^>]+>", " ", stripped)
+        stripped = re.sub(r"\s+", " ", stripped).strip()
+        return stripped[:600]
+
+
 class PolicyDrivenSearchProvider:
     """Policy + health-aware provider orchestration with optional speculative execution."""
 
@@ -617,12 +1135,16 @@ class PolicyDrivenSearchProvider:
             result.intent = intent
             result.fallback_used = True
             result.providers_tried = [self._fallback.name]
-            result.confidence = self._compute_confidence(result.documents, fallback_used=True)
+            result.documents = rank_documents_for_query(query, result.documents, limit=limit)
+            result.confidence = self._compute_confidence(result.documents, fallback_used=True, query=query)
             result.latency_ms = int((time.perf_counter() - started_at) * 1000)
             result.cache_ttl_seconds = cache_ttl_seconds
             return result
 
         provider_names = self._policy.provider_candidates(intent)
+        if intent == "market_live" and is_commodity_query(query):
+            provider_names = ["commodity_refs", "newsapi", *provider_names]
+            provider_names = list(dict.fromkeys(provider_names))
         providers = [self._providers[name] for name in provider_names if name in self._providers]
         providers_tried: list[str] = []
 
@@ -632,7 +1154,7 @@ class PolicyDrivenSearchProvider:
                 selected.intent = intent
                 selected.providers_tried = providers_tried
                 selected.fallback_used = selected.provider == self._fallback.name
-                selected.confidence = self._compute_confidence(selected.documents, fallback_used=selected.fallback_used)
+                selected.confidence = self._compute_confidence(selected.documents, fallback_used=selected.fallback_used, query=query)
                 selected.latency_ms = int((time.perf_counter() - started_at) * 1000)
                 selected.cache_ttl_seconds = cache_ttl_seconds
                 return selected
@@ -643,7 +1165,7 @@ class PolicyDrivenSearchProvider:
                 candidate.intent = intent
                 candidate.providers_tried = providers_tried
                 candidate.fallback_used = False
-                candidate.confidence = self._compute_confidence(candidate.documents, fallback_used=False)
+                candidate.confidence = self._compute_confidence(candidate.documents, fallback_used=False, query=query)
                 candidate.latency_ms = int((time.perf_counter() - started_at) * 1000)
                 candidate.cache_ttl_seconds = cache_ttl_seconds
                 return candidate
@@ -655,7 +1177,8 @@ class PolicyDrivenSearchProvider:
             fallback_result.intent = intent
             fallback_result.fallback_used = True
             fallback_result.providers_tried = providers_tried
-            fallback_result.confidence = self._compute_confidence(fallback_result.documents, fallback_used=True)
+            fallback_result.documents = rank_documents_for_query(query, fallback_result.documents, limit=limit)
+            fallback_result.confidence = self._compute_confidence(fallback_result.documents, fallback_used=True, query=query)
             fallback_result.latency_ms = int((time.perf_counter() - started_at) * 1000)
             fallback_result.cache_ttl_seconds = cache_ttl_seconds
             return fallback_result
@@ -686,7 +1209,8 @@ class PolicyDrivenSearchProvider:
         for result in results:
             if isinstance(result, Exception) or result is None or not result.documents:
                 continue
-            score = self._provider_rank(result.provider) + self._documents_quality(result.documents)
+            result.documents = rank_documents_for_query(query, result.documents, limit=limit)
+            score = self._provider_rank(result.provider) + self._documents_quality(query, result.documents)
             if score > best_score:
                 best = result
                 best_score = score
@@ -713,9 +1237,13 @@ class PolicyDrivenSearchProvider:
 
         if breaker is not None:
             breaker.record_success()
+        if result.documents:
+            result.documents = rank_documents_for_query(query, result.documents, limit=limit)
         return result
 
     def _provider_rank(self, provider_name: str) -> float:
+        if provider_name == "commodity_refs":
+            return 0.58
         if provider_name == "weather_open_meteo":
             return 0.6
         if provider_name == "duckduckgo":
@@ -724,18 +1252,20 @@ class PolicyDrivenSearchProvider:
             return 0.1
         return 0.2
 
-    def _documents_quality(self, documents: list[SearchDocument]) -> float:
+    def _documents_quality(self, query: str, documents: list[SearchDocument]) -> float:
         if not documents:
             return 0.0
         avg_reliability = sum(max(0.0, min(1.0, doc.reliability)) for doc in documents) / len(documents)
         source_bonus = min(len({doc.url for doc in documents}) * 0.05, 0.2)
         live_bonus = 0.1 if any(doc.freshness == "live" for doc in documents) else 0.0
-        return avg_reliability + source_bonus + live_bonus
+        top_relevance = score_document_relevance(documents[0], query)
+        official_bonus = 0.12 if is_commodity_query(query) and is_official_commodity_source(documents[0], query) else 0.0
+        return avg_reliability + source_bonus + live_bonus + min(top_relevance * 0.15, 0.3) + official_bonus
 
-    def _compute_confidence(self, documents: list[SearchDocument], fallback_used: bool) -> float:
+    def _compute_confidence(self, documents: list[SearchDocument], fallback_used: bool, query: str = "") -> float:
         if not documents:
             return 0.0
-        confidence = self._documents_quality(documents)
+        confidence = self._documents_quality(query, documents) if query else self._documents_quality("", documents)
         if fallback_used:
             confidence *= 0.5
         return round(max(0.0, min(1.0, confidence)), 2)

@@ -38,6 +38,7 @@ class MockTraceEngine(TraceEngineProtocol):
         mode: str,
         session_id: str,
         session_label: str,
+        message_id: str,
     ) -> list[TraceEvent]:
         events: list[TraceEvent] = []
 
@@ -51,6 +52,7 @@ class MockTraceEngine(TraceEngineProtocol):
                     mode=mode,
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
@@ -66,6 +68,7 @@ class MockTraceEngine(TraceEngineProtocol):
                     mode=mode,
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
@@ -81,6 +84,7 @@ class MockTraceEngine(TraceEngineProtocol):
                     mode=mode,
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
@@ -96,13 +100,14 @@ class MockTraceEngine(TraceEngineProtocol):
                     mode=mode,
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
 
         return events
 
-    async def stream(self, prompt: str, session_id: str, session_label: str) -> AsyncIterator[TraceEvent]:
+    async def stream(self, prompt: str, session_id: str, session_label: str, message_id: str) -> AsyncIterator[TraceEvent]:
         issues = self._extract_issues(prompt)
         mode = "parallel" if len(issues) >= 3 else "sequential"
 
@@ -114,6 +119,7 @@ class MockTraceEngine(TraceEngineProtocol):
                 mode=mode,
                 session_id=session_id,
                 session_label=session_label,
+                message_id=message_id,
             )
         )
         await sleep_ms(260)
@@ -126,12 +132,13 @@ class MockTraceEngine(TraceEngineProtocol):
                 mode=mode,
                 session_id=session_id,
                 session_label=session_label,
+                message_id=message_id,
             )
         )
 
         branch_labels = ["A", "B", "C"]
         branch_coroutines = [
-            self._simulate_branch(issue, branch_labels[index], mode, session_id, session_label)
+            self._simulate_branch(issue, branch_labels[index], mode, session_id, session_label, message_id)
             for index, issue in enumerate(issues)
         ]
 
@@ -153,6 +160,7 @@ class MockTraceEngine(TraceEngineProtocol):
                 mode=mode,
                 session_id=session_id,
                 session_label=session_label,
+                message_id=message_id,
             )
         )
         await sleep_ms(260)
@@ -165,11 +173,12 @@ class MockTraceEngine(TraceEngineProtocol):
                 mode=mode,
                 session_id=session_id,
                 session_label=session_label,
+                message_id=message_id,
             )
         )
 
-    async def run(self, prompt: str, session_id: str, session_label: str) -> list[TraceEvent]:
-        return [event async for event in self.stream(prompt, session_id, session_label)]
+    async def run(self, prompt: str, session_id: str, session_label: str, message_id: str) -> list[TraceEvent]:
+        return [event async for event in self.stream(prompt, session_id, session_label, message_id)]
 
     def build_final_answer(self, prompt: str) -> str:
         final_answers = {

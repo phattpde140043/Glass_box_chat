@@ -26,7 +26,7 @@ class GeminiTraceEngine(TraceEngineProtocol):
         self.model = model
         self._cache: dict[str, str] = {}
 
-    async def run(self, prompt: str, session_id: str, session_label: str) -> list[TraceEvent]:
+    async def run(self, prompt: str, session_id: str, session_label: str, message_id: str) -> list[TraceEvent]:
         """
         Generate trace events by calling Gemini API.
         Pipeline: thinking → tool_call (generateContent) → tool_result (response) → done
@@ -42,6 +42,7 @@ class GeminiTraceEngine(TraceEngineProtocol):
                     agent="GeminiLLM",
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
@@ -55,6 +56,7 @@ class GeminiTraceEngine(TraceEngineProtocol):
                     agent="GeminiLLM",
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
@@ -80,6 +82,7 @@ class GeminiTraceEngine(TraceEngineProtocol):
                     agent="GeminiLLM",
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
@@ -93,14 +96,15 @@ class GeminiTraceEngine(TraceEngineProtocol):
                     agent="GeminiLLM",
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
         )
 
         return events
 
-    async def stream(self, prompt: str, session_id: str, session_label: str) -> AsyncIterator[TraceEvent]:
-        for event in await self.run(prompt, session_id, session_label):
+    async def stream(self, prompt: str, session_id: str, session_label: str, message_id: str) -> AsyncIterator[TraceEvent]:
+        for event in await self.run(prompt, session_id, session_label, message_id):
             yield event
 
     def _call_gemini(self, prompt: str) -> str:
