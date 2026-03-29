@@ -28,14 +28,6 @@ class AgentRunService:
         self._repository = repository
         self._trace_engine = trace_engine
 
-    def _init_run_context(self, prompt: str) -> RunContext:
-        context = build_run_context(self._repository.count_sessions() + 1)
-        self._repository.create_session(session_id=context.session_id, label=context.session_label)
-        self._repository.create_root_task(task_id=context.root_task_id, session_id=context.session_id, prompt=prompt)
-        self._repository.transition_task(task_id=context.root_task_id, target_status=TASK_STATE_QUEUED)
-        self._repository.transition_task(task_id=context.root_task_id, target_status=TASK_STATE_RUNNING)
-        return context
-
     def _persist_trace_event(self, context: RunContext, payload_dict: dict) -> None:
         self._repository.append_event(
             event_id=payload_dict["id"],
@@ -96,23 +88,33 @@ class AgentRunService:
 
         return final_content, normalized_sources, normalized_source_details
 
-    async def stream_run_agent(self, prompt: str) -> AsyncIterator[dict[str, str]]:
-        context = self._init_run_context(prompt)
+    async def stream_run_agent(self, prompt: str, session_id: str | None = None, message_id: str | None = None) -> AsyncIterator[dict[str, str]]:
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not message_id:
+            raise ValueError("message_id is required")
+
+        context = build_run_context(session_id=session_id, message_id=message_id)
+        self._repository.create_session(session_id=context.session_id, label=context.session_label)
+        self._repository.create_root_task(task_id=context.root_task_id, session_id=context.session_id, prompt=prompt)
+        self._repository.transition_task(task_id=context.root_task_id, target_status=TASK_STATE_QUEUED)
+        self._repository.transition_task(task_id=context.root_task_id, target_status=TASK_STATE_RUNNING)
 
         try:
             start_payload = build_trace_payload(
                 event="agent_start",
-                detail="Nhận tin nhắn mới từ người dùng. Bắt đầu phiên phân tích runtime trace.",
+                detail="Received a new user message. Starting the runtime trace analysis session.",
                 agent="CoordinatorAgent",
                 session_id=context.session_id,
                 session_label=context.session_label,
+                message_id=context.message_id,
             )
             self._persist_trace_event(context, start_payload)
             yield sse_event("message", start_payload)
 
             await sleep_ms(200)
 
-            async for event in self._trace_engine.stream(prompt, context.session_id, context.session_label):
+            async for event in self._trace_engine.stream(prompt, context.session_id, context.session_label, context.message_id):
                 event_payload = event.model_dump()
                 self._persist_trace_event(context, event_payload)
 

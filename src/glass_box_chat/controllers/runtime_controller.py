@@ -46,10 +46,12 @@ _task_distributor = TaskDistributor()
 
 async def _run_task_handler(_: str, payload: dict[str, Any]) -> None:
     prompt = str(payload["prompt"])
+    session_id = str(payload["session_id"])
+    message_id = str(payload["message_id"])
     event_queue: asyncio.Queue[dict[str, str] | None] = payload["event_queue"]
 
     try:
-        async for event in _agent_run.stream_run_agent(prompt):
+        async for event in _agent_run.stream_run_agent(prompt, session_id=session_id, message_id=message_id):
             await event_queue.put(event)
     finally:
         await event_queue.put(None)
@@ -106,6 +108,8 @@ async def run_agent(payload: RunRequest) -> EventSourceResponse:
         task_id,
         {
             "prompt": payload.prompt,
+            "session_id": payload.sessionId,
+            "message_id": payload.messageId,
             "event_queue": event_queue,
         },
     )

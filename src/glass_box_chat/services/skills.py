@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Callable, Protocol
 
 from .planner import needs_research_text
 from .result_formatting import (
+    AnalysisDataPointModel,
+    AnalysisResultEnvelopeModel,
     EvidenceModel,
     ResearchResultEnvelopeModel,
     ResearchSourceModel,
     extract_result_text,
     format_dependency_outputs,
     format_sources_for_user,
+    parse_analysis_result,
     parse_research_result,
 )
 from .runtime_resilience import classify_error
-from .search_providers import SearchDocument, SearchProvider, SearchResultBatch
+from .search_providers import SearchDocument, SearchProvider, SearchResultBatch, rank_documents_for_query
 from .skill_core import SkillContext, SkillMetadata, SkillResult
 
 
@@ -58,8 +62,97 @@ class ResearchSkill(BaseLLMSkill):
         super().__init__(model_source)
         self._search_provider = search_provider
 
+    _MOCK_HINTS = (
+        "example.local",
+        "mock-result",
+        "demo",
+        "mô phỏng",
+        "mo phong",
+    )
+
+    _SUBJECT_HINT_GROUPS = (
+        ("cà phê", "ca phe", "cafe", "coffee", "arabica", "robusta"),
+        ("hồ tiêu", "ho tieu", "pepper"),
+        ("gia vang", "giá vàng", "gold", "xau", "xauusd"),
+        ("bitcoin", "btc", "ethereum", "eth", "crypto"),
+    )
+
     def can_handle(self, input_data: dict[str, object]) -> bool:
         return needs_research_text(str(input_data.get("description", "")))
+
+    @classmethod
+    def _is_mock_document(cls, document: SearchDocument) -> bool:
+        haystack = f"{document.title} {document.snippet} {document.url} {document.provider}".lower()
+        return document.provider == "mock" or any(token in haystack for token in cls._MOCK_HINTS)
+
+    @classmethod
+    def _extract_subject_hints(cls, task_description: str) -> tuple[str, ...]:
+        lowered = task_description.lower()
+        for hint_group in cls._SUBJECT_HINT_GROUPS:
+            if any(token in lowered for token in hint_group):
+                return hint_group
+        return ()
+
+    @classmethod
+    def _filter_documents(cls, task_description: str, documents: list[SearchDocument]) -> tuple[list[SearchDocument], str | None]:
+        non_mock_documents = [document for document in documents if not cls._is_mock_document(document)]
+        if not non_mock_documents:
+            return [], "mock_only"
+
+        subject_hints = cls._extract_subject_hints(task_description)
+        if not subject_hints:
+            return rank_documents_for_query(task_description, non_mock_documents), None
+
+        relevant_documents = [
+            document
+            for document in non_mock_documents
+            if any(token in f"{document.title} {document.snippet} {document.url}".lower() for token in subject_hints)
+        ]
+        if relevant_documents:
+            return rank_documents_for_query(task_description, relevant_documents), None
+        return [], "insufficient_relevance"
+
+    @staticmethod
+    def _build_insufficient_evidence_result(
+        reason: str,
+        search_batch: SearchResultBatch,
+        task_description: str,
+        used_tool: str,
+        raw_document_count: int,
+    ) -> SkillResult:
+        if reason == "mock_only":
+            error = "insufficient_live_evidence"
+            message = (
+                "Khong co du lieu live dang tin cay cho yeu cau nay. "
+                "He thong da tranh dung source demo/mock de dua ra nhan dinh."
+            )
+        else:
+            error = "insufficient_relevant_evidence"
+            message = (
+                "Da thu thu thap thong tin nhung chua co du lieu lien quan truc tiep den chu de can phan tich."
+            )
+
+        return SkillResult(
+            success=False,
+            error=error,
+            metadata={
+                "provider": search_batch.provider,
+                "source_count": 0,
+                "retrieved_source_count": raw_document_count,
+                "freshness": "n/a",
+                "citation_count": 0,
+                "citations": "none",
+                "fallback_used": search_batch.fallback_used,
+                "latency_ms": search_batch.latency_ms,
+                "confidence": 0.0,
+                "intent": search_batch.intent,
+                "providers_tried": ",".join(search_batch.providers_tried or []),
+                "cache_ttl_seconds": search_batch.cache_ttl_seconds,
+                "used_tool": used_tool,
+                "error_type": "permanent",
+                "error_detail": f"{message} Task={task_description[:160]}",
+            },
+        )
 
     @staticmethod
     def _build_search_batch_from_tool_output(tool_name: str, tool_result: object) -> SearchResultBatch | None:
@@ -250,8 +343,18 @@ class ResearchSkill(BaseLLMSkill):
                     },
                 )
             search_batch = await self._search_provider.search(task_description, limit=4)
-        
-        documents = search_batch.documents
+
+        raw_documents = list(search_batch.documents)
+        documents, filter_reason = self._filter_documents(task_description, raw_documents)
+        if filter_reason is not None:
+            return self._build_insufficient_evidence_result(
+                reason=filter_reason,
+                search_batch=search_batch,
+                task_description=task_description,
+                used_tool=context.selected_tool.name if context.selected_tool is not None else "none",
+                raw_document_count=len(raw_documents),
+            )
+
         if not documents:
             return SkillResult(success=False, error="no_research_results", metadata={"error_type": "permanent"})
 
@@ -356,7 +459,15 @@ class FinanceSkill:
 
     def can_handle(self, input_data: dict[str, object]) -> bool:
         text = str(input_data.get("description", "")).lower()
-        return any(token in text for token in self._MARKET_HINTS)
+        tokens = {token for token in re.split(r"[^\wÀ-ỹ]+", text) if token}
+        for hint in self._MARKET_HINTS:
+            if " " in hint:
+                if hint in text:
+                    return True
+                continue
+            if hint in tokens:
+                return True
+        return False
 
     async def execute(self, context: SkillContext) -> SkillResult:
         from .tools import FinanceTool, ToolInput
@@ -458,12 +569,8 @@ class FinanceSkill:
                 },
             )
 
-        market_data = {}
         tool_documents: list[dict[str, object]] = []
         if isinstance(tool_result.data, dict):
-            market_raw = tool_result.data.get("market")
-            if isinstance(market_raw, dict):
-                market_data = market_raw
             docs_raw = tool_result.data.get("documents")
             if isinstance(docs_raw, list):
                 tool_documents = [doc for doc in docs_raw if isinstance(doc, dict)]
@@ -543,6 +650,363 @@ class FinanceSkill:
         )
 
 
+class AnalysisSkill(BaseLLMSkill):
+    metadata = SkillMetadata(
+        name="analysis",
+        description="Analyze multi-source research evidence into trend, drivers, and risk-aware outlook.",
+        examples=["phan tich xu huong", "market analysis", "trend outlook", "nhan dinh thi truong"],
+        priority_weight=0.22,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1},
+            },
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    _ANALYSIS_HINTS = (
+        "phân tích",
+        "phan tich",
+        "nhận định",
+        "nhan dinh",
+        "xu hướng",
+        "xu huong",
+        "outlook",
+        "trend",
+        "assessment",
+    )
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        text = str(input_data.get("description", "")).lower()
+        return any(token in text for token in self._ANALYSIS_HINTS)
+
+    @staticmethod
+    def _derive_outlook(signals: list[str]) -> str:
+        lowered = " ".join(signals).lower()
+        if any(token in lowered for token in ("tang", "uptrend", "thieu cung", "tight supply", "support")):
+            return "bullish"
+        if any(token in lowered for token in ("giam", "downtrend", "du cung", "weak demand", "pressure")):
+            return "bearish"
+        return "neutral"
+
+    @staticmethod
+    def _safe_float(value: object) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _extract_first_numeric(cls, text: str) -> float | None:
+        candidates = re.findall(r"\b(\d{1,6}(?:[.,]\d{1,4})?)\b", text)
+        for candidate in candidates:
+            number = cls._safe_float(candidate.replace(",", "."))
+            if number is None:
+                continue
+            if 0.0 <= number <= 1_000_000.0:
+                return number
+        return None
+
+    @classmethod
+    def _normalize_data_points(
+        cls,
+        *,
+        dependency_outputs: dict[str, object],
+        research_payloads: list[ResearchResultEnvelopeModel],
+        task_description: str,
+    ) -> list[AnalysisDataPointModel]:
+        points: list[AnalysisDataPointModel] = []
+
+        # Prefer explicit structured market payload when available.
+        for payload in dependency_outputs.values():
+            if not isinstance(payload, dict):
+                continue
+            market = payload.get("market") if isinstance(payload.get("market"), dict) else None
+            if market is None:
+                continue
+            price = cls._safe_float(market.get("price"))
+            if price is None:
+                continue
+            points.append(
+                AnalysisDataPointModel(
+                    metric="price",
+                    value=price,
+                    unit=str(market.get("currency", "USD")),
+                    subject=str(market.get("symbol", market.get("asset", "market"))),
+                    timestamp=str(market.get("timestamp", "")) or None,
+                    source=str(market.get("source", "tool://finance")),
+                    reliability=0.9,
+                )
+            )
+
+        # Fallback: extract coarse numeric signals from research snippets.
+        if not points:
+            for payload in research_payloads:
+                for source in payload.sources:
+                    numeric = cls._extract_first_numeric(f"{source.title} {source.snippet}")
+                    if numeric is None:
+                        continue
+                    points.append(
+                        AnalysisDataPointModel(
+                            metric="observed_value",
+                            value=numeric,
+                            unit="n/a",
+                            subject=task_description[:120] or "market",
+                            timestamp=source.published_at,
+                            source=source.url,
+                            reliability=source.reliability,
+                        )
+                    )
+                    if len(points) >= 12:
+                        break
+                if len(points) >= 12:
+                    break
+
+        # Deduplicate by (metric, subject, source, rounded value).
+        dedup: list[AnalysisDataPointModel] = []
+        seen: set[str] = set()
+        for item in points:
+            key = f"{item.metric}|{item.subject}|{item.source}|{round(item.value, 4)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(item)
+            if len(dedup) >= 12:
+                break
+        return dedup
+
+    @staticmethod
+    def _detect_data_conflicts(data_points: list[AnalysisDataPointModel]) -> int:
+        buckets: dict[tuple[str, str], list[float]] = {}
+        for point in data_points:
+            key = (point.subject.lower(), point.metric.lower())
+            buckets.setdefault(key, []).append(point.value)
+
+        conflicts = 0
+        for values in buckets.values():
+            if len(values) < 2:
+                continue
+            low = min(values)
+            high = max(values)
+            baseline = max(abs(low), 1.0)
+            spread_ratio = abs(high - low) / baseline
+            if spread_ratio >= 0.06:
+                conflicts += 1
+        return conflicts
+
+    @staticmethod
+    def _rate_evidence_quality(*, avg_reliability: float, source_diversity: int, data_coverage: float, conflict_count: int) -> str:
+        score = avg_reliability * 0.45 + min(source_diversity / 4.0, 1.0) * 0.25 + data_coverage * 0.2 - min(conflict_count * 0.12, 0.24)
+        if score >= 0.72:
+            return "high"
+        if score >= 0.5:
+            return "medium"
+        return "low"
+
+    @classmethod
+    def _compute_confidence(
+        cls,
+        *,
+        research_payloads: list[ResearchResultEnvelopeModel],
+        data_points: list[AnalysisDataPointModel],
+        conflict_count: int,
+    ) -> tuple[float, float, str]:
+        avg_research_conf = sum(payload.confidence for payload in research_payloads) / max(len(research_payloads), 1)
+        data_coverage = min(len(data_points) / 6.0, 1.0)
+        avg_reliability = (
+            sum(point.reliability for point in data_points) / len(data_points)
+            if data_points
+            else 0.45
+        )
+        source_diversity = len({point.source for point in data_points})
+        quality = cls._rate_evidence_quality(
+            avg_reliability=avg_reliability,
+            source_diversity=source_diversity,
+            data_coverage=data_coverage,
+            conflict_count=conflict_count,
+        )
+
+        confidence = (
+            avg_research_conf * 0.5
+            + avg_reliability * 0.2
+            + min(source_diversity / 5.0, 1.0) * 0.15
+            + data_coverage * 0.15
+            - min(conflict_count * 0.1, 0.3)
+        )
+        return round(max(0.05, min(confidence, 0.98)), 2), round(data_coverage, 2), quality
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        task_description = str(context.input.get("description", "")).strip() or context.normalized_prompt
+        research_payloads = [
+            payload for payload in (parse_research_result(value) for value in context.dependency_outputs.values()) if payload is not None
+        ]
+        if not research_payloads:
+            degraded_prompt = (
+                "Ban la AnalysisSkill o che do degraded. Khong co evidence live dang tin cay tu research. "
+                "Hay dua ra nhan dinh tong quat ngan gon dua tren kien thuc co ban, KHONG khang dinh tuyet doi, "
+                "va neu ro can xac minh them truoc khi su dung trong quyet dinh quan trong.\n\n"
+                f"Prompt chuan hoa: {context.normalized_prompt}\n"
+                f"Task phan tich: {task_description}"
+            )
+            degraded = await self._generate(degraded_prompt)
+            if not degraded.success:
+                return degraded
+
+            degraded_summary = extract_result_text(degraded.data).strip() or "Khong du evidence live; day la nhan dinh tong quat tam thoi."
+            degraded_summary = (
+                "Luu y: khong du du lieu dang tin cay tu nguon live, phan hoi duoi day chi dua tren thong tin co ban. "
+                "Ban can xac minh lai truoc khi su dung cho muc dich khac.\n\n"
+                f"{degraded_summary}"
+            )
+            payload = AnalysisResultEnvelopeModel(
+                kind="analysis_result",
+                summary=degraded_summary,
+                confidence=0.2,
+                signals=["No live evidence available; using baseline prior knowledge"],
+                assumptions=["Market condition may have changed since model knowledge cutoff"],
+                limitations=["No validated external evidence was retrieved for this run"],
+                outlook="neutral",
+                data_points=[],
+                data_coverage=0.0,
+                conflict_count=0,
+                evidence_quality="low",
+            ).model_dump()
+            return SkillResult(
+                success=True,
+                data=payload,
+                metadata={
+                    "provider": "analysis",
+                    "source_count": 0,
+                    "citation_count": 0,
+                    "citations": "none",
+                    "freshness": "n/a",
+                    "fallback_used": True,
+                    "confidence": 0.2,
+                    "intent": "analysis_degraded",
+                    "providers_tried": "none",
+                    "cache_ttl_seconds": 0,
+                    "used_tool": "none",
+                    "data_points_count": 0,
+                    "data_coverage": 0.0,
+                    "conflict_count": 0,
+                    "evidence_quality": "low",
+                },
+            )
+
+        evidence_lines: list[str] = []
+        for idx, payload in enumerate(research_payloads, start=1):
+            evidence_lines.append(f"[{idx}] {payload.summary}")
+            for source in payload.sources[:3]:
+                evidence_lines.append(f"- {source.title} | {source.url} | {source.freshness}")
+        evidence_block = "\n".join(evidence_lines)
+
+        prompt = (
+            "Ban la AnalysisSkill. Nhiem vu: phan tich xu huong dua tren research evidence da co, "
+            "khong bo sung fact moi ngoai evidence. Viet bang tieng Viet, ngan gon nhung ro logic.\n\n"
+            f"Prompt chuan hoa: {context.normalized_prompt}\n"
+            f"Task phan tich: {task_description}\n"
+            f"Memory gan day:\n{context.recent_memory or '- none'}\n"
+            f"Evidence tong hop:\n{evidence_block}\n\n"
+            "Tra ve 4 muc trong van ban thuong:\n"
+            "1) Ket luan xu huong\n"
+            "2) Tin hieu/dong luc chinh\n"
+            "3) Gia dinh/ngoai le\n"
+            "4) Gioi han du lieu va muc do chac chan"
+        )
+        result = await self._generate(prompt)
+        if not result.success:
+            return result
+
+        summary = extract_result_text(result.data).strip() or "Khong du thong tin de ket luan xu huong mot cach chac chan."
+        signals: list[str] = []
+        for payload in research_payloads:
+            snippet = payload.summary.strip()
+            if snippet and snippet not in signals:
+                signals.append(snippet[:180])
+            if len(signals) >= 4:
+                break
+
+        assumptions = [
+            "Gia dinh du lieu nguon van phan anh dung boi canh hien tai.",
+            "Khong co su kien dot bien ngoai evidence da thu thap.",
+        ]
+        limitations = [
+            "Khong co du lieu giao dich vi mo day du theo thoi gian thuc.",
+            "Mot so nguon co do tre cap nhat va pham vi khu vuc han che.",
+        ]
+        data_points = self._normalize_data_points(
+            dependency_outputs=context.dependency_outputs,
+            research_payloads=research_payloads,
+            task_description=task_description,
+        )
+        conflict_count = self._detect_data_conflicts(data_points)
+        confidence, data_coverage, evidence_quality = self._compute_confidence(
+            research_payloads=research_payloads,
+            data_points=data_points,
+            conflict_count=conflict_count,
+        )
+
+        if conflict_count > 0:
+            limitations = [
+                f"Phat hien {conflict_count} nhom du lieu co chenh lech dang ke giua cac nguon.",
+                *limitations,
+            ]
+
+        if data_points:
+            limitations = [
+                "Data points duoc trich xuat tu evidence va co the khac nhau theo cach bao cao cua tung nguon.",
+                *limitations,
+            ]
+
+        if confidence < 0.45 or evidence_quality == "low":
+            summary = (
+                "Do tin cay cua bo evidence hien tai con han che, can them du lieu doc lap truoc khi dua ra nhan dinh manh.\n"
+                f"Tom tat tam thoi: {summary}"
+            )
+            assumptions = [
+                "Ket luan duoi day chi la nhan dinh tam thoi do do phu du lieu chua cao.",
+                *assumptions,
+            ]
+
+        payload = AnalysisResultEnvelopeModel(
+            kind="analysis_result",
+            summary=summary,
+            confidence=confidence,
+            signals=signals,
+            assumptions=assumptions,
+            limitations=limitations,
+            outlook=self._derive_outlook(signals),
+            data_points=data_points,
+            data_coverage=data_coverage,
+            conflict_count=conflict_count,
+            evidence_quality=evidence_quality,
+        ).model_dump()
+
+        return SkillResult(
+            success=True,
+            data=payload,
+            metadata={
+                "provider": "analysis",
+                "source_count": len(research_payloads),
+                "citation_count": 0,
+                "citations": "none",
+                "freshness": "recent",
+                "fallback_used": confidence < 0.45,
+                "confidence": confidence,
+                "intent": "analysis",
+                "providers_tried": "dependency_outputs",
+                "cache_ttl_seconds": 0,
+                "used_tool": "none",
+                "data_points_count": len(data_points),
+                "data_coverage": data_coverage,
+                "conflict_count": conflict_count,
+                "evidence_quality": evidence_quality,
+            },
+        )
+
+
 class GeneralAnswerSkill(BaseLLMSkill):
     metadata = SkillMetadata(
         name="general_answer",
@@ -563,10 +1027,46 @@ class GeneralAnswerSkill(BaseLLMSkill):
         _ = input_data
         return True
 
+    @staticmethod
+    def _infer_conversation_mode(text: str) -> str:
+        lowered = text.lower().strip()
+        greeting_hints = (
+            "xin chao",
+            "xin chào",
+            "chao",
+            "chào",
+            "hello",
+            "hi",
+            "hey",
+        )
+        request_hints = (
+            "giup",
+            "giúp",
+            "hay",
+            "hãy",
+            "co the",
+            "có thể",
+            "please",
+        )
+
+        if any(token in lowered for token in greeting_hints) and len(lowered.split()) <= 6:
+            return "greeting"
+        if "?" in text or any(token in lowered for token in request_hints):
+            return "question_or_request"
+        return "statement_or_context"
+
     async def execute(self, context: SkillContext) -> SkillResult:
         task_description = str(context.input.get("description", ""))
+        conversation_mode = self._infer_conversation_mode(task_description or context.normalized_prompt)
         prompt = (
-            "Bạn là GeneralAnswerSkill. Trả lời ngắn gọn, đúng trọng tâm, bằng tiếng Việt.\n\n"
+            "Bạn là GeneralAnswerSkill. Trả lời ngắn gọn, tự nhiên, bằng tiếng Việt, theo đúng ngữ cảnh hội thoại.\n"
+            "Quy tắc:\n"
+            "- Nếu đây là greeting: trả lời thân thiện, ngắn, không lặp lại nguyên văn câu user.\n"
+            "- Nếu đây là statement/context người dùng đang chia sẻ: không được chỉ echo lại câu user. Hãy phản hồi tự nhiên bằng cách ghi nhận thông tin, thể hiện tiếp nối hội thoại, và khi phù hợp thì hỏi 1 câu follow-up hữu ích hoặc gợi ý hỗ trợ liên quan.\n"
+            "- Nếu đây là question/request: trả lời trực tiếp, rõ ý, tránh lan man.\n"
+            "- Không bịa dữ kiện bên ngoài prompt/memory.\n"
+            "- Tránh mở đầu máy móc như 'Bạn nói rằng...' hoặc chép lại nguyên câu user.\n\n"
+            f"Conversation mode: {conversation_mode}\n"
             f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
             f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
             f"Task: {task_description}"
@@ -691,13 +1191,34 @@ class SynthesizerSkill(BaseLLMSkill):
         _ = input_data
         return True
 
+    @staticmethod
+    def _is_insufficient_summary(text: str) -> bool:
+        lowered = text.lower()
+        insufficiency_hints = (
+            "khong du",
+            "không đủ",
+            "chua co du",
+            "chưa có đủ",
+            "insufficient",
+            "not enough data",
+            "no enough data",
+            "khong co du lieu",
+            "không có dữ liệu",
+            "gioi han",
+            "giới hạn",
+        )
+        return any(token in lowered for token in insufficiency_hints)
+
     async def execute(self, context: SkillContext) -> SkillResult:
         deps_text = format_dependency_outputs(context.dependency_outputs)
         research_payloads = [
             payload for payload in (parse_research_result(value) for value in context.dependency_outputs.values()) if payload is not None
         ]
+        analysis_payloads = [
+            payload for payload in (parse_analysis_result(value) for value in context.dependency_outputs.values()) if payload is not None
+        ]
 
-        if not context.dependency_outputs and not research_payloads:
+        if not context.dependency_outputs and not research_payloads and not analysis_payloads:
             # Fallback to pure knowledge answer when synthesis is invoked without evidence.
             fallback_prompt = (
                 "Bạn là SynthesizerSkill. Không có kết quả phụ thuộc/evidence từ tool. "
@@ -706,12 +1227,80 @@ class SynthesizerSkill(BaseLLMSkill):
                 f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
                 f"Task: {str(context.input.get('description', '')).strip() or context.normalized_prompt}"
             )
-            return await self._generate(fallback_prompt)
+            fallback_result = await self._generate(fallback_prompt)
+            if fallback_result.success:
+                fallback_result.metadata = {
+                    **(fallback_result.metadata or {}),
+                    "provider": "synthesizer",
+                    "source_count": 0,
+                    "citation_count": 0,
+                    "citations": "none",
+                    "freshness": "n/a",
+                    "fallback_used": True,
+                    "confidence": 0.55,
+                    "intent": "knowledge_fallback",
+                    "providers_tried": "none",
+                    "cache_ttl_seconds": 0,
+                    "used_tool": "none",
+                }
+            return fallback_result
+
+        failed_steps = [
+            key
+            for key, value in context.dependency_outputs.items()
+            if extract_result_text(value).strip().startswith("ERROR:")
+        ]
+
+        if context.dependency_outputs and not research_payloads and not analysis_payloads and failed_steps and len(failed_steps) == len(context.dependency_outputs):
+            degraded_prompt = (
+                "Ban la SynthesizerSkill trong che do degraded. Toan bo dependency outputs khong thu duoc evidence live hop le. "
+                "Hay tra loi ngan gon dua tren thong tin co ban, khong khang dinh tuyet doi, va neu ro can xac minh them.\n\n"
+                f"Prompt chuan hoa: {context.normalized_prompt}\n"
+                f"Task: {str(context.input.get('description', '')).strip() or context.normalized_prompt}"
+            )
+            degraded = await self._generate(degraded_prompt)
+            if not degraded.success:
+                return degraded
+
+            degraded_answer = extract_result_text(degraded.data).strip() or "Khong du evidence live; day la cau tra loi tam thoi."
+            degraded_answer = (
+                "Tuyen bo trach nhiem: khong du du lieu dang tin cay tu cac nguon live, cau tra loi duoi day chi dua tren thong tin co ban. "
+                "Ban can xac minh lai truoc khi su dung cho cac muc dich khac.\n\n"
+                f"{degraded_answer}"
+            )
+            return SkillResult(
+                success=True,
+                data=degraded_answer,
+                metadata={
+                    "provider": "synthesizer",
+                    "source_count": 0,
+                    "citation_count": 0,
+                    "citations": "none",
+                    "freshness": "n/a",
+                    "fallback_used": True,
+                    "confidence": 0.18,
+                    "intent": "degraded_llm",
+                    "providers_tried": "dependency_outputs",
+                    "cache_ttl_seconds": 0,
+                    "used_tool": "none",
+                    "failed_steps": ",".join(failed_steps),
+                },
+            )
 
         evidence_block = "\n\n".join(
             [
                 f"Research summary: {payload.summary}\nSources:\n{format_sources_for_user(payload.sources) or '- none'}"
                 for payload in research_payloads
+            ]
+        )
+        analysis_block = "\n\n".join(
+            [
+                "Analysis summary: "
+                f"{payload.summary}\n"
+                f"Signals: {'; '.join(payload.signals[:4]) if payload.signals else '- none'}\n"
+                f"Limitations: {'; '.join(payload.limitations[:3]) if payload.limitations else '- none'}\n"
+                f"Quality: {payload.evidence_quality}; Coverage: {payload.data_coverage}; Conflicts: {payload.conflict_count}"
+                for payload in analysis_payloads
             ]
         )
         prompt = (
@@ -722,7 +1311,8 @@ class SynthesizerSkill(BaseLLMSkill):
             f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
             f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
             f"Dependency outputs:\n{deps_text or '- none'}\n"
-            f"Research evidence:\n{evidence_block or '- none'}"
+            f"Research evidence:\n{evidence_block or '- none'}\n"
+            f"Analysis evidence:\n{analysis_block or '- none'}"
         )
         result = await self._generate(prompt)
         if not result.success:
@@ -734,5 +1324,203 @@ class SynthesizerSkill(BaseLLMSkill):
             source_block = format_sources_for_user(sources)
             if source_block and source_block not in answer_text:
                 answer_text = f"{answer_text}\n\nNguon tham khao:\n{source_block}"
+            unique_urls: list[str] = []
+            for source in sources:
+                if source.url not in unique_urls:
+                    unique_urls.append(source.url)
+            avg_confidence = sum(payload.confidence for payload in research_payloads) / max(len(research_payloads), 1)
+            insufficient_count = sum(1 for payload in research_payloads if self._is_insufficient_summary(payload.summary))
+            if insufficient_count > 0:
+                insufficient_penalty = min(0.25 + insufficient_count * 0.12, 0.65)
+                avg_confidence = max(0.15, avg_confidence - insufficient_penalty)
+                answer_text = (
+                    "Luu y: bo evidence hien tai con thieu du lieu truc tiep cho mot so khia canh, "
+                    "vi vay muc do chac chan da duoc giam de tranh ket luan qua muc.\n\n"
+                    f"{answer_text}"
+                )
+            freshness = sources[0].freshness if sources else "n/a"
+            result.metadata = {
+                **(result.metadata or {}),
+                "provider": "synthesizer",
+                "source_count": len(unique_urls),
+                "citation_count": len(unique_urls),
+                "citations": ",".join(unique_urls) if unique_urls else "none",
+                "freshness": freshness,
+                "fallback_used": insufficient_count > 0,
+                "confidence": round(float(avg_confidence), 2),
+                "intent": "synthesis",
+                "providers_tried": "dependency_outputs",
+                "cache_ttl_seconds": 0,
+                "used_tool": "none",
+                "insufficient_research_count": insufficient_count,
+            }
+        elif analysis_payloads:
+            avg_confidence = sum(payload.confidence for payload in analysis_payloads) / max(len(analysis_payloads), 1)
+            max_conflicts = max((payload.conflict_count for payload in analysis_payloads), default=0)
+            min_quality = "high"
+            for payload in analysis_payloads:
+                if payload.evidence_quality == "low":
+                    min_quality = "low"
+                    break
+                if payload.evidence_quality == "medium":
+                    min_quality = "medium"
+
+            if max_conflicts > 0 or avg_confidence < 0.45:
+                answer_text = (
+                    "Luu y: cac ket luan duoi day co tinh chat tam thoi do evidence con xung dot hoac do tin cay chua cao.\n\n"
+                    f"{answer_text}"
+                )
+
+            result.metadata = {
+                **(result.metadata or {}),
+                "provider": "synthesizer",
+                "source_count": len(analysis_payloads),
+                "citation_count": 0,
+                "citations": "none",
+                "freshness": "recent",
+                "fallback_used": max_conflicts > 0 or avg_confidence < 0.45,
+                "confidence": round(float(avg_confidence), 2),
+                "intent": "synthesis",
+                "providers_tried": "analysis_outputs",
+                "cache_ttl_seconds": 0,
+                "used_tool": "none",
+                "conflict_count": max_conflicts,
+                "evidence_quality": min_quality,
+            }
+        else:
+            result.metadata = {
+                **(result.metadata or {}),
+                "provider": "synthesizer",
+                "source_count": 0,
+                "citation_count": 0,
+                "citations": "none",
+                "freshness": "n/a",
+                "fallback_used": False,
+                "confidence": 0.6,
+                "intent": "synthesis",
+                "providers_tried": "none",
+                "cache_ttl_seconds": 0,
+                "used_tool": "none",
+            }
         result.data = answer_text
+        return result
+
+
+class FusionSkill(BaseLLMSkill):
+    """Arbitration layer for multi-hypothesis execution.
+
+    Reads path-a (cheap LLM direct) and path-b (research) dependency outputs
+    and selects the stronger signal or blends both transparently.
+
+    Decision logic:
+      research_preferred  — research confidence >= 0.55 AND not insufficient AND has sources
+      llm_direct_fallback — research failed/insufficient AND cheap text exists
+      blend               — otherwise (partial evidence on both sides)
+    """
+
+    metadata = SkillMetadata(
+        name="fusion",
+        description="Arbitrate and fuse outputs from parallel cheap/expensive execution paths.",
+        examples=["ambiguity resolution", "path fusion", "multi-hypothesis merge"],
+        priority_weight=0.19,
+        input_schema={
+            "type": "object",
+            "properties": {"description": {"type": "string", "minLength": 1}},
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    _RESEARCH_CONFIDENCE_GATE: float = 0.55
+    _INSUFFICIENT_HINTS = (
+        "khong du", "không đủ", "chua co du", "chưa có đủ",
+        "insufficient", "no evidence", "mock",
+    )
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        _ = input_data
+        return True
+
+    @classmethod
+    def _is_insufficient(cls, text: str) -> bool:
+        lowered = text.lower()
+        return any(token in lowered for token in cls._INSUFFICIENT_HINTS)
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        cheap_raw = context.dependency_outputs.get("path-a")
+        research_raw = context.dependency_outputs.get("path-b")
+        cheap_text = extract_result_text(cheap_raw).strip() if cheap_raw is not None else ""
+        research_payload = parse_research_result(research_raw) if research_raw is not None else None
+
+        has_strong_research = (
+            research_payload is not None
+            and research_payload.confidence >= self._RESEARCH_CONFIDENCE_GATE
+            and not self._is_insufficient(research_payload.summary or "")
+            and bool(research_payload.sources)
+        )
+
+        if has_strong_research and research_payload is not None:
+            decision = "research_preferred"
+            primary_text = research_payload.summary
+            secondary_text = cheap_text
+            sources = research_payload.sources
+            confidence = research_payload.confidence
+        elif cheap_text and (research_payload is None or self._is_insufficient(research_payload.summary or "")):
+            decision = "llm_direct_fallback"
+            primary_text = cheap_text
+            secondary_text = ""
+            sources = []
+            confidence = 0.55
+        else:
+            decision = "blend"
+            primary_text = cheap_text
+            secondary_text = research_payload.summary if research_payload else ""
+            sources = research_payload.sources if research_payload else []
+            confidence = (research_payload.confidence if research_payload else 0.5) * 0.6 + 0.4 * 0.5
+
+        blend_section = (
+            f"\nBổ sung từ LLM direct:\n{secondary_text}"
+            if decision == "research_preferred" and secondary_text
+            else ""
+        )
+        prompt = (
+            "Bạn là FusionSkill. Nhiệm vụ: tạo câu trả lời cuối cùng từ 2 nguồn đã thu thập song song.\n"
+            "Ưu tiên: nếu có evidence từ research (có nguồn cụ thể) → dùng làm nền tảng chính. "
+            "Nếu LLM direct answer bổ sung context hữu ích → tích hợp không lặp ý.\n"
+            "Không được thêm fact mới ngoài những gì đã có. Viết tự nhiên bằng tiếng Việt.\n\n"
+            f"Prompt gốc: {context.normalized_prompt}\n"
+            f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
+            f"Decision: {decision}\n"
+            f"Nguồn chính:\n{primary_text or '- none'}"
+            f"{blend_section}"
+        )
+        result = await self._generate(prompt)
+        if not result.success:
+            return result
+
+        answer_text = extract_result_text(result.data).strip() or primary_text or "Không đủ evidence để trả lời."
+        if sources:
+            source_block = format_sources_for_user(sources)
+            if source_block and source_block not in answer_text:
+                answer_text = f"{answer_text}\n\nNguồn tham khảo:\n{source_block}"
+            unique_urls = list({s.url for s in sources})
+        else:
+            unique_urls = []
+
+        result.data = answer_text
+        result.metadata = {
+            **(result.metadata or {}),
+            "provider": "fusion",
+            "decision": decision,
+            "source_count": len(unique_urls),
+            "citation_count": len(unique_urls),
+            "citations": ",".join(unique_urls) if unique_urls else "none",
+            "freshness": sources[0].freshness if sources else "n/a",
+            "fallback_used": decision != "research_preferred",
+            "confidence": round(float(confidence), 2),
+            "intent": "fusion",
+            "providers_tried": "path-a,path-b",
+            "cache_ttl_seconds": 0,
+            "used_tool": "none",
+        }
         return result

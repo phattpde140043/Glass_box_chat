@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, Callable, Literal, Protocol, TypedDict
+from typing import Any, Callable, NotRequired, Protocol, TypedDict
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -53,6 +53,56 @@ MARKET_HINTS = (
     "forex",
 )
 
+MARKET_ANALYSIS_HINTS = (
+    "nhận định",
+    "nhan dinh",
+    "phân tích",
+    "phan tich",
+    "tình hình",
+    "tinh hinh",
+    "xu hướng",
+    "xu huong",
+    "outlook",
+    "trend",
+    "assessment",
+    "analyze",
+    "analysis",
+    "đánh giá",
+    "danh gia",
+)
+
+GENERIC_ANALYSIS_HINTS = (
+    "phân tích",
+    "phan tich",
+    "nhận định",
+    "nhan dinh",
+    "xu hướng",
+    "xu huong",
+    "dự báo",
+    "du bao",
+    "trend",
+    "outlook",
+    "assessment",
+    "analyze",
+    "analysis",
+    "impact",
+)
+
+COMMODITY_HINTS = (
+    "cà phê",
+    "ca phe",
+    "cafe",
+    "coffee",
+    "arabica",
+    "robusta",
+    "commodity",
+    "nông sản",
+    "nong san",
+    "hồ tiêu",
+    "ho tieu",
+    "pepper",
+)
+
 RESEARCH_HINTS = (
     "nghiên cứu",
     "tra cứu",
@@ -62,12 +112,56 @@ RESEARCH_HINTS = (
     *TIME_SENSITIVE_HINTS,
 )
 
+LOOKUP_HINTS = (
+    "thông tin",
+    "thong tin",
+    "tìm kiếm",
+    "tim kiem",
+    "tra cứu",
+    "tra cuu",
+    "information search",
+    "lookup",
+    "find information",
+    "who is",
+    "what is",
+    "là gì",
+    "la gi",
+)
+
+SIMPLE_FACT_HINTS = (
+    "what is",
+    "who is",
+    "population",
+    "capital",
+    "definition",
+    "meaning",
+    "là gì",
+    "la gi",
+    "dân số",
+    "dan so",
+    "thủ đô",
+    "thu do",
+)
+
 EXPLICIT_RESEARCH_HINTS = (
     "nghiên cứu",
     "tra cứu",
     "tìm thông tin",
     "search",
     "research",
+)
+
+GREETING_HINTS = (
+    "xin chao",
+    "xin chào",
+    "chao",
+    "chào",
+    "hello",
+    "hi",
+    "hey",
+    "good morning",
+    "good afternoon",
+    "good evening",
 )
 
 
@@ -79,6 +173,15 @@ class AnalysisResult(TypedDict):
     keywords: list[str]
     sub_tasks: list[dict[str, str]]
     execution_mode: str
+    time_window: str
+    confidence: float
+    intent_tier: NotRequired[str]
+    need_pipeline: NotRequired[bool]
+    need_tools: NotRequired[bool]
+    decision_confidence: NotRequired[float]
+    decision_reason: NotRequired[str]
+    intent_candidates: NotRequired[list[dict]]
+    is_ambiguous: NotRequired[bool]
 
 
 class PlannerDependencyModel(BaseModel):
@@ -132,9 +235,99 @@ def is_explicit_research_task(text: str) -> bool:
     return any(token in lowered for token in EXPLICIT_RESEARCH_HINTS)
 
 
-def is_market_data_text(text: str) -> bool:
+def is_greeting_text(text: str) -> bool:
+    lowered = re.sub(r"\s+", " ", text.lower()).strip()
+    if not lowered:
+        return False
+    if is_market_data_text(lowered) or is_market_analysis_text(lowered):
+        return False
+    if is_lookup_text(lowered) or needs_research_text(lowered) or is_weather_text(lowered):
+        return False
+    if any(token in lowered for token in GENERIC_ANALYSIS_HINTS):
+        return False
+
+    words = [token for token in re.split(r"[^\wÀ-ỹ]+", lowered) if token]
+    if len(words) > 6:
+        return False
+    return _contains_hint(lowered, GREETING_HINTS)
+
+
+def _contains_hint(text: str, hints: tuple[str, ...]) -> bool:
     lowered = text.lower()
-    return any(token in lowered for token in MARKET_HINTS)
+    tokens = {token for token in re.split(r"[^\wÀ-ỹ]+", lowered) if token}
+    for hint in hints:
+        normalized_hint = hint.lower()
+        if " " in normalized_hint:
+            if normalized_hint in lowered:
+                return True
+            continue
+        if normalized_hint in tokens:
+            return True
+    return False
+
+
+def is_market_data_text(text: str) -> bool:
+    return _contains_hint(text, MARKET_HINTS)
+
+
+def is_lookup_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in LOOKUP_HINTS)
+
+
+def is_simple_fact_text(text: str) -> bool:
+    lowered = text.lower().strip()
+    if is_market_data_text(lowered) or is_market_analysis_text(lowered):
+        return False
+    if any(token in lowered for token in ("today", "latest", "hôm nay", "mới nhất", "real-time", "realtime")):
+        return False
+    return any(token in lowered for token in SIMPLE_FACT_HINTS) and len(lowered.split()) <= 14
+
+
+def is_market_analysis_text(text: str) -> bool:
+    lowered = text.lower()
+    has_analysis_signal = _contains_hint(lowered, MARKET_ANALYSIS_HINTS)
+    has_subject_signal = _contains_hint(lowered, (*COMMODITY_HINTS, *MARKET_HINTS))
+    has_time_signal = any(token in lowered for token in ("tháng", "thang", "month", "tuần", "tuan", "week", "quý", "quy", "recent", "gần đây", "gan day"))
+    return has_analysis_signal and (has_subject_signal or has_time_signal)
+
+
+def is_trend_analysis_text(text: str) -> bool:
+    lowered = text.lower()
+    has_analysis_signal = _contains_hint(lowered, MARKET_ANALYSIS_HINTS)
+    has_time_signal = any(token in lowered for token in ("tháng", "thang", "month", "tuần", "tuan", "week", "quý", "quy", "recent", "gần đây", "gan day", "quarter", "year"))
+    has_subject_signal = _contains_hint(lowered, (*COMMODITY_HINTS, *MARKET_HINTS))
+    return has_analysis_signal and (has_time_signal or has_subject_signal)
+
+
+def infer_time_window(text: str) -> str:
+    lowered = text.lower()
+    if any(token in lowered for token in ("hôm nay", "hom nay", "today", "intraday")):
+        return "intraday"
+    if any(token in lowered for token in ("tuần", "tuan", "week", "weekly")):
+        return "1w"
+    if any(token in lowered for token in ("tháng", "thang", "month", "monthly")):
+        return "1m"
+    if any(token in lowered for token in ("quý", "quy", "quarter")):
+        return "1q"
+    if any(token in lowered for token in ("năm", "nam", "year", "yearly")):
+        return "1y"
+    if any(token in lowered for token in ("gần đây", "gan day", "recent", "latest")):
+        return "recent"
+    return "unspecified"
+
+
+def infer_market_subject(text: str) -> str:
+    lowered = text.lower()
+    if any(token in lowered for token in ("cà phê", "ca phe", "cafe", "coffee", "arabica", "robusta")):
+        return "thị trường cà phê thế giới"
+    if any(token in lowered for token in ("hồ tiêu", "ho tieu", "pepper")):
+        return "thị trường hồ tiêu thế giới"
+    if any(token in lowered for token in ("gia vang", "giá vàng", "gold", "xau", "xauusd")):
+        return "thị trường vàng"
+    if any(token in lowered for token in ("bitcoin", "btc", "ethereum", "eth", "crypto")):
+        return "thị trường crypto"
+    return "thị trường mục tiêu"
 
 
 class AutoDAGPlanner:
@@ -143,8 +336,192 @@ class AutoDAGPlanner:
         self._llm_json_inferer = llm_json_inferer
 
     async def build(self, analysis: AnalysisResult) -> list[DAGNode]:
+        normalized_prompt = analysis["normalized_prompt"]
+
+        if analysis.get("need_pipeline") is False:
+            return [
+                DAGNode(
+                    id="task-1",
+                    skill="general_answer",
+                    input={
+                        "id": "task-1",
+                        "description": normalized_prompt,
+                        "routed_skill": "general_answer",
+                        "route_score": "execution_gate_direct",
+                        "cache_policy": "default",
+                    },
+                    depends_on=[],
+                    branch="main",
+                    priority=94,
+                )
+            ]
+
+        if is_greeting_text(normalized_prompt):
+            return [
+                DAGNode(
+                    id="task-1",
+                    skill="general_answer",
+                    input={
+                        "id": "task-1",
+                        "description": normalized_prompt,
+                        "routed_skill": "general_answer",
+                        "route_score": "intent_greeting_direct",
+                        "cache_policy": "default",
+                    },
+                    depends_on=[],
+                    branch="main",
+                    priority=92,
+                )
+            ]
+
+        if analysis.get("is_ambiguous"):
+            return [
+                DAGNode(
+                    id="path-a",
+                    skill="general_answer",
+                    input={
+                        "id": "path-a",
+                        "description": normalized_prompt,
+                        "routed_skill": "general_answer",
+                        "route_score": "multi_path_cheap",
+                        "cache_policy": "default",
+                        "path_role": "cheap",
+                    },
+                    depends_on=[],
+                    branch="A",
+                    priority=102,
+                ),
+                DAGNode(
+                    id="path-b",
+                    skill="research",
+                    input={
+                        "id": "path-b",
+                        "description": normalized_prompt,
+                        "routed_skill": "research",
+                        "route_score": "multi_path_research",
+                        "cache_policy": "bypass",
+                        "path_role": "expensive",
+                    },
+                    depends_on=[],
+                    branch="B",
+                    priority=98,
+                ),
+                DAGNode(
+                    id="fusion",
+                    skill="fusion",
+                    input={
+                        "id": "fusion",
+                        "description": f"Ambiguity fusion: {normalized_prompt}",
+                        "routed_skill": "fusion",
+                        "route_score": "multi_path_fusion",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["path-a", "path-b"],
+                    branch="main",
+                    priority=-1,
+                ),
+            ]
+
+        if is_weather_text(normalized_prompt) or analysis.get("decision_reason") == "implicit_weather_suitability":
+            return [
+                DAGNode(
+                    id="task-1",
+                    skill="research",
+                    input={
+                        "id": "task-1",
+                        "description": normalized_prompt,
+                        "routed_skill": "research",
+                        "route_score": "intent_weather_lookup",
+                        "cache_policy": "bypass",
+                        "selected_tool": "weather",
+                        "selected_tool_confidence": "0.95",
+                        "selected_tool_reason": "Weather query should preserve full context and use weather provider first",
+                    },
+                    depends_on=[],
+                    branch="main",
+                    priority=122,
+                ),
+                DAGNode(
+                    id="synthesis",
+                    skill="synthesizer",
+                    input={"description": "Synthesize weather findings and suitability recommendation"},
+                    depends_on=["task-1"],
+                    branch="main",
+                    priority=-1,
+                ),
+            ]
+
+        if analysis.get("intent") in {"market_analysis", "trend_analysis"} or is_market_analysis_text(analysis["normalized_prompt"]) or is_trend_analysis_text(analysis["normalized_prompt"]):
+            subject = infer_market_subject(normalized_prompt)
+            time_window = str(analysis.get("time_window") or infer_time_window(normalized_prompt))
+            return [
+                DAGNode(
+                    id="task-1",
+                    skill="research",
+                    input={
+                        "id": "task-1",
+                        "description": (
+                            f"Thu thập chuoi du lieu gia, bien dong gan day va toc do thay doi cua {subject} "
+                            f"trong khung thoi gian {time_window}. Prompt goc: {normalized_prompt}"
+                        ),
+                        "routed_skill": "research",
+                        "route_score": "intent_trend_analysis_data",
+                        "cache_policy": "bypass",
+                        "selected_tool": "",
+                        "selected_tool_reason": "Use policy-driven research for trend analysis data",
+                    },
+                    depends_on=[],
+                    branch="A",
+                    priority=125,
+                ),
+                DAGNode(
+                    id="task-2",
+                    skill="research",
+                    input={
+                        "id": "task-2",
+                        "description": (
+                            f"Thu thap boi canh cung-cau, ton kho, thoi tiet, logistics, ty gia va chinh sach "
+                            f"dang anh huong toi {subject} trong khung {time_window}. Prompt goc: {normalized_prompt}"
+                        ),
+                        "routed_skill": "research",
+                        "route_score": "intent_trend_analysis_context",
+                        "cache_policy": "bypass",
+                        "selected_tool": "",
+                        "selected_tool_reason": "Use policy-driven research for trend analysis context",
+                    },
+                    depends_on=[],
+                    branch="B",
+                    priority=118,
+                ),
+                DAGNode(
+                    id="analysis",
+                    skill="analysis",
+                    input={
+                        "id": "analysis",
+                        "description": (
+                            f"Phan tich xu huong cua {subject} trong khung {time_window}: "
+                            "tong hop tin hieu, danh gia xung dot, neu gia dinh va gioi han evidence. "
+                            f"Prompt goc: {normalized_prompt}"
+                        ),
+                        "routed_skill": "analysis",
+                        "route_score": "intent_trend_analysis_reasoning",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["task-1", "task-2"],
+                    branch="main",
+                    priority=108,
+                ),
+                DAGNode(
+                    id="synthesis",
+                    skill="synthesizer",
+                    input={"description": "Synthesize trend analysis findings"},
+                    depends_on=["task-1", "task-2", "analysis"],
+                    branch="main",
+                    priority=-1,
+                ),
+            ]
+
         if analysis.get("intent") == "market_price" or is_market_data_text(analysis["normalized_prompt"]):
-            normalized_prompt = analysis["normalized_prompt"]
             return [
                 DAGNode(
                     id="task-1",
@@ -173,6 +550,53 @@ class AutoDAGPlanner:
                 ),
             ]
 
+        if analysis.get("intent") == "simple_fact" or is_simple_fact_text(analysis["normalized_prompt"]):
+            return [
+                DAGNode(
+                    id="task-1",
+                    skill="general_answer",
+                    input={
+                        "id": "task-1",
+                        "description": normalized_prompt,
+                        "routed_skill": "general_answer",
+                        "route_score": "intent_simple_fact",
+                        "cache_policy": "default",
+                    },
+                    depends_on=[],
+                    branch="main",
+                    priority=90,
+                )
+            ]
+
+        if analysis.get("intent") in {"knowledge_lookup", "information_retrieval"} or is_lookup_text(analysis["normalized_prompt"]):
+            return [
+                DAGNode(
+                    id="task-1",
+                    skill="research",
+                    input={
+                        "id": "task-1",
+                        "description": normalized_prompt,
+                        "routed_skill": "research",
+                        "route_score": "intent_knowledge_lookup",
+                        "cache_policy": "bypass",
+                        "selected_tool": "web_search",
+                        "selected_tool_confidence": "0.75",
+                        "selected_tool_reason": "Lookup query should gather external evidence",
+                    },
+                    depends_on=[],
+                    branch="main",
+                    priority=95,
+                ),
+                DAGNode(
+                    id="synthesis",
+                    skill="synthesizer",
+                    input={"description": "Synthesize lookup findings"},
+                    depends_on=["task-1"],
+                    branch="main",
+                    priority=-1,
+                ),
+            ]
+
         branches = ["A", "B", "C", "main"]
         nodes: list[DAGNode] = []
         planned_tasks = self._inject_research_tasks(analysis["sub_tasks"], analysis["normalized_prompt"])
@@ -181,7 +605,6 @@ class AutoDAGPlanner:
             routed = await self._router.route(task)
             routed_skill = routed.skill_name
 
-            # Guardrail: regular task nodes should never execute synthesizer directly.
             if routed_skill == "synthesizer":
                 description = str(task.get("description", ""))
                 routed_skill = "research" if needs_research_text(description) else "general_answer"
@@ -214,6 +637,28 @@ class AutoDAGPlanner:
             for node in nodes:
                 node.depends_on = sequential.get(node.id, [])
 
+        if self._should_inject_analysis_layer(analysis, nodes):
+            upstream_ids = [node.id for node in nodes]
+            nodes.append(
+                DAGNode(
+                    id="analysis",
+                    skill="analysis",
+                    input={
+                        "id": "analysis",
+                        "description": (
+                            "Phan tich tong hop cac ket qua nghien cuu, xac dinh tin hieu chinh, "
+                            "neu gia dinh, rui ro va gioi han du lieu."
+                        ),
+                        "routed_skill": "analysis",
+                        "route_score": "injected_reasoning_layer",
+                        "cache_policy": "default",
+                    },
+                    depends_on=upstream_ids,
+                    branch="main",
+                    priority=8,
+                )
+            )
+
         should_add_synthesis = len(nodes) > 1 or any(node.skill == "research" for node in nodes)
         if should_add_synthesis:
             nodes.append(
@@ -230,8 +675,37 @@ class AutoDAGPlanner:
         return nodes
 
     @staticmethod
+    def _should_inject_analysis_layer(analysis: AnalysisResult, nodes: list[DAGNode]) -> bool:
+        if any(node.skill == "analysis" for node in nodes):
+            return False
+        if not any(node.skill == "research" for node in nodes):
+            return False
+
+        intent = str(analysis.get("intent", "")).strip().lower()
+        prompt = str(analysis.get("normalized_prompt", "")).lower()
+        if is_weather_text(prompt):
+            return False
+        has_analysis_hint = any(token in prompt for token in GENERIC_ANALYSIS_HINTS)
+        has_commodity_hint = _contains_hint(prompt, COMMODITY_HINTS)
+        has_time_hint = any(token in prompt for token in ("month", "months", "past", "last", "week", "quarter", "year", "six months", "6 months"))
+
+        if intent in {"trend_analysis", "market_analysis"}:
+            return True
+
+        if intent in {"knowledge_lookup", "information_retrieval", "research"} and has_analysis_hint:
+            return True
+
+        if has_analysis_hint and has_commodity_hint and has_time_hint:
+            return True
+
+        research_count = sum(1 for node in nodes if node.skill == "research")
+        if intent in {"knowledge_lookup", "research"} and research_count >= 2 and analysis.get("execution_mode") == "parallel":
+            return True
+
+        return False
+
+    @staticmethod
     def _collapse_weather_research_nodes(nodes: list[DAGNode], normalized_prompt: str) -> list[DAGNode]:
-        """For pure weather prompts, keep a single research node to avoid duplicate tool calls."""
         if not is_weather_text(normalized_prompt):
             return nodes
 
@@ -241,7 +715,6 @@ class AutoDAGPlanner:
         if any(node.skill != "research" for node in non_synth_nodes):
             return nodes
 
-        # Keep the highest-priority research node only.
         best = max(non_synth_nodes, key=lambda node: (node.priority, -len(node.depends_on), node.id))
         return [best]
 
@@ -463,10 +936,6 @@ class AutoDAGPlanner:
                     return parsed
 
         raise ValueError("No valid JSON object found in planner LLM response.")
-
-    @staticmethod
-    def _extract_json_object(raw: str) -> str:
-        return json.dumps(AutoDAGPlanner._extract_json_payload(raw), ensure_ascii=False)
 
     @staticmethod
     def _estimate_priority(description: str, routed: RoutedSkill) -> int:

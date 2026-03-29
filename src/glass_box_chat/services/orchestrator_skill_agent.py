@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import AsyncIterator
 from collections.abc import Callable
@@ -9,10 +8,11 @@ from typing import Any
 from ..models.chat_models import TraceEvent
 from ..utils.trace_payload_utils import build_trace_payload
 from .executor import DAGExecutor
+from .execution_gate import ExecutionGate
 from .final_response_builder import FinalResponseBuilder
 from .input_analyzer import InputAnalyzer
 from .llm_backends import ClaudeLLMBackend, GeminiLLMBackend, LLMBackend
-from .planner import AutoDAGPlanner, AnalysisResult, needs_research_text
+from .planner import AutoDAGPlanner, AnalysisResult
 from .provider_factories import build_default_llm_backend, build_default_search_provider
 from .runtime_metrics import RuntimeMetrics
 from .runtime_resilience import NodeCache, ShortTermMemoryStore, classify_error
@@ -21,22 +21,51 @@ from .result_formatting import (
     collect_source_details_from_results,
     collect_sources_from_results,
     extract_result_text,
-    render_result_for_user,
 )
 from .search_providers import (
-    DuckDuckGoSearchProvider,
-    FallbackSearchProvider,
-    MockSearchProvider,
     SearchDocument,
     SearchProvider,
     SearchResultBatch,
 )
 from .semantic_router import EmbeddingService, SemanticRouter
-from .skill_core import DAGNode, RoutedSkill, SkillContext, SkillMetadata, SkillRegistry, SkillResult
-from .tool_analyzer import ToolAnalyzer
-from .trace_event_formatter import build_execution_trace_entry, build_tool_call_detail, build_tool_result_detail
+from .skill_core import DAGNode, SkillContext, SkillMetadata, SkillRegistry, SkillResult
 from .skills import PlanningSkill, ResearchSkill, SynthesizerSkill
+from .tool_analyzer import ToolAnalyzer
+from .trace_event_formatter import (
+    build_analysis_detail,
+    build_done_detail,
+    build_execution_trace_entry,
+    build_plan_detail,
+    build_tool_call_detail,
+    build_tool_phase_details,
+    build_tool_result_detail,
+)
 from .trace_engine_protocol import TraceEngineProtocol
+from .tools.tool_resolver import ToolResolver
+from .search_decision_gate import SearchDecisionGate
+from .meta_reasoning_agent import MetaReasoningAgent
+from .answer_critic_agent import AnswerCriticAgent
+from .parallel_execution_orchestrator import ParallelExecutionOrchestrator
+
+__all__ = [
+    "DAGExecutor",
+    "DAGNode",
+    "EmbeddingService",
+    "NodeCache",
+    "OrchestratorSkillAgent",
+    "PlanningSkill",
+    "ResearchSkill",
+    "SearchDocument",
+    "SearchProvider",
+    "SearchResultBatch",
+    "SemanticRouter",
+    "ShortTermMemoryStore",
+    "SkillContext",
+    "SkillMetadata",
+    "SkillRegistry",
+    "SkillResult",
+    "SynthesizerSkill",
+]
 
 
 
@@ -93,12 +122,23 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
         self._embedding_service = embedding_service or EmbeddingService()
         self._router = router or SemanticRouter(self._registry, self._embedding_service)
         self._planner = planner or AutoDAGPlanner(self._router, self._call_model)
-        self._executor = executor or DAGExecutor(self._registry)
+        self._tool_resolver = ToolResolver()
+        self._executor = executor or DAGExecutor(self._registry, tool_resolver=self._tool_resolver)
         self._analyzer = analyzer or InputAnalyzer(
             self._call_model,
             lambda sid: self._memory.snapshot(sid),
             self._STOPWORDS,
         )
+        self._execution_gate = ExecutionGate(self._call_model)
+        self._search_decision_gate = SearchDecisionGate(
+            self._call_model,
+            lambda sid: self._memory.snapshot(sid),
+        )
+        # Initialize Decision Intelligence Layer agents
+        self._meta_reasoning_agent = MetaReasoningAgent(self._call_model)
+        self._answer_critic_agent = AnswerCriticAgent(self._call_model)
+        self._parallel_orchestrator = ParallelExecutionOrchestrator(self._call_model)
+        
         self._final_response_builder = final_response_builder or FinalResponseBuilder()
         self._router_initialized = False
         self._metrics_service = RuntimeMetrics(self._llm_provider)
@@ -123,46 +163,90 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
             raise TypeError("Default LLM backend factory must return object with generate().")
         return backend
 
-    async def run(self, prompt: str, session_id: str, session_label: str) -> list[TraceEvent]:
-        return [event async for event in self.stream(prompt, session_id, session_label)]
+    async def run(self, prompt: str, session_id: str, session_label: str, message_id: str) -> list[TraceEvent]:
+        return [event async for event in self.stream(prompt, session_id, session_label, message_id)]
 
-    async def stream(self, prompt: str, session_id: str, session_label: str) -> AsyncIterator[TraceEvent]:
+    async def stream(self, prompt: str, session_id: str, session_label: str, message_id: str) -> AsyncIterator[TraceEvent]:
         if not self._router_initialized:
             await self._router.init()
             self._router_initialized = True
 
+        # Phase 1: Input Analysis
         analysis = self._analyze_input(prompt, session_id)
+        analysis = self._apply_search_decision_gate(analysis, session_id)
+        analysis = self._apply_execution_gate(analysis)
+        
+        # Phase 2a: Decision Intelligence Layer - Meta-Reasoning (NEW)
+        meta_reasoning = await self._apply_meta_reasoning(analysis, session_id)
+        
+        # Phase 2b: Decision Intelligence Layer - Parallel Execution (NEW)
+        parallel_config = await self._apply_parallel_orchestration(meta_reasoning, analysis)
+        
+        # Phase 3: DAG Planning (with decision inputs)
         dag = await self._planner.build(analysis)
+        
+        # Convert to parallel DAG if needed (from parallel_config)
+        if parallel_config.get("enable_parallel", False):
+            dag = parallel_config.get("convert_to_parallel_dag", lambda d: d)(dag)
+        
         self._apply_tool_hints(dag, analysis)
         dag_summary = "; ".join(
             f"{node.id}<-{node.depends_on or []}:{node.skill}[p={node.priority}]" for node in dag
         )
         self._metrics_service.mark_run_started(analysis["execution_mode"], len(dag))
+        self._memory.remember(session_id, "chat_user", prompt)
         self._memory.remember(session_id, "user_prompt", prompt)
         self._memory.remember(session_id, "analysis", f"intent={analysis['intent']} keywords={analysis['keywords']}")
+        self._memory.remember(session_id, "meta_reasoning", f"strategy={meta_reasoning.get('strategy', 'unknown')}")
         self._metrics_service.update_memory_entries(self._memory.size(session_id))
 
         yield TraceEvent(
             **build_trace_payload(
                 event="thinking",
-                detail=(
-                    "Refining input + semantic analysis complete. "
-                    f"intent={analysis['intent']}, sentiment={analysis['sentiment']}, keywords={analysis['keywords']}"
+                detail=build_analysis_detail(
+                    intent=analysis["intent"],
+                    sentiment=analysis["sentiment"],
+                    keywords=analysis["keywords"],
+                    execution_mode=analysis["execution_mode"],
+                    normalized_prompt=analysis["normalized_prompt"],
                 ),
                 agent="OrchestratorAgent",
                 mode=analysis["execution_mode"],
                 session_id=session_id,
                 session_label=session_label,
+                message_id=message_id,
             )
         )
+        
+        # Emit Meta-Reasoning decision
         yield TraceEvent(
             **build_trace_payload(
                 event="thinking",
-                detail=f"Auto DAG planned with {len(dag)} nodes. {dag_summary}",
+                detail={
+                    "phase": "decision_intelligence",
+                    "strategy": meta_reasoning.get("strategy"),
+                    "confidence": meta_reasoning.get("confidence"),
+                    "reason": meta_reasoning.get("reason"),
+                    "risk": meta_reasoning.get("risk", {}),
+                    "parallel_enabled": parallel_config.get("enable_parallel", False),
+                },
+                agent="MetaReasoningAgent",
+                mode=analysis["execution_mode"],
+                session_id=session_id,
+                session_label=session_label,
+                message_id=message_id,
+            )
+        )
+        
+        yield TraceEvent(
+            **build_trace_payload(
+                event="thinking",
+                detail=build_plan_detail(dag, dag_summary),
                 agent="OrchestratorAgent",
                 mode=analysis["execution_mode"],
                 session_id=session_id,
                 session_label=session_label,
+                message_id=message_id,
             )
         )
 
@@ -196,8 +280,22 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
                     mode=analysis["execution_mode"],
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
+            for phase_detail in build_tool_phase_details(trace_entry):
+                yield TraceEvent(
+                    **build_trace_payload(
+                        event="thinking",
+                        detail=phase_detail,
+                        agent="OrchestratorAgent",
+                        branch=trace_entry["branch"],
+                        mode=analysis["execution_mode"],
+                        session_id=session_id,
+                        session_label=session_label,
+                        message_id=message_id,
+                    )
+                )
             yield TraceEvent(
                 **build_trace_payload(
                     event="tool_result",
@@ -207,24 +305,66 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
                     mode=analysis["execution_mode"],
                     session_id=session_id,
                     session_label=session_label,
+                    message_id=message_id,
                 )
             )
 
         final_answer, final_payload = self._get_final_response_builder().build_payload_from_results(results, analysis)
+        
+        # Phase 5b: Quality Control - Answer Critic (NEW)
+        synthesized = {
+            "text": final_answer,
+            "sources": collect_sources_from_results(results),
+        }
+        critic_verdict = await self._apply_answer_critique(
+            analysis,
+            results,
+            synthesized,
+            session_id,
+        )
+        
+        # Emit Critic verdict
+        yield TraceEvent(
+            **build_trace_payload(
+                event="thinking",
+                detail={
+                    "phase": "quality_control",
+                    "is_safe": critic_verdict.get("is_safe"),
+                    "overall_quality": critic_verdict.get("overall_quality"),
+                    "needs_revision": critic_verdict.get("needs_revision"),
+                    "issues_count": len(critic_verdict.get("issues", [])),
+                    "revision_strategy": critic_verdict.get("revision_strategy"),
+                },
+                agent="AnswerCriticAgent",
+                mode=analysis["execution_mode"],
+                session_id=session_id,
+                session_label=session_label,
+                message_id=message_id,
+            )
+        )
+        
+        # Store final answer
         self._answer_cache[prompt] = final_answer
         self._answer_payload_cache[prompt] = final_payload
+        self._memory.remember(session_id, "chat_assistant", final_answer)
         self._memory.remember(session_id, "final_answer", final_answer)
+        self._memory.remember(session_id, "critic_verdict", f"quality={critic_verdict.get('overall_quality'):.2f} safe={critic_verdict.get('is_safe')}")
         self._record_execution_metrics(execution_trace)
         self._metrics_service.mark_completed()
 
         yield TraceEvent(
             **build_trace_payload(
                 event="done",
-                detail="DAG execution and aggregation completed.",
+                detail=build_done_detail(
+                    total_nodes=len(execution_trace),
+                    successful_nodes=sum(1 for entry in execution_trace if entry.get("success") == "true"),
+                    failed_nodes=sum(1 for entry in execution_trace if entry.get("success") != "true"),
+                ),
                 agent="OrchestratorAgent",
                 mode=analysis["execution_mode"],
                 session_id=session_id,
                 session_label=session_label,
+                message_id=message_id,
             )
         )
 
@@ -253,11 +393,98 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
     def _analyze_input(self, prompt: str, session_id: str) -> AnalysisResult:
         return self._get_analyzer().analyze(prompt, session_id)
 
-    def _analyze_input_llm(self, prompt: str, session_id: str) -> AnalysisResult:
-        return self._get_analyzer().analyze_with_llm(prompt, session_id)
+    def _apply_search_decision_gate(self, analysis: AnalysisResult, session_id: str) -> AnalysisResult:
+        """Apply SearchDecisionGate: LLM-based decision on whether search/tools needed.
+        
+        This gate answers: "Given this intent, does the user query require live/external data?"
+        Allows graceful degradation: if search not needed, can skip pipeline for faster response.
+        """
+        gate = getattr(self, "_search_decision_gate", None)
+        if gate is None:
+            gate = SearchDecisionGate(
+                self._call_model,
+                lambda sid: self._memory.snapshot(sid),
+            )
+            self._search_decision_gate = gate
+        return gate.analyze_search_need(analysis, session_id)
 
-    def _analyze_input_rule_based(self, prompt: str) -> AnalysisResult:
-        return self._get_analyzer().analyze_rule_based(prompt)
+    def _apply_execution_gate(self, analysis: AnalysisResult) -> AnalysisResult:
+        gate = getattr(self, "_execution_gate", None)
+        if gate is None:
+            gate = ExecutionGate(self._call_model)
+            self._execution_gate = gate
+        return gate.decide(analysis)
+
+    async def _apply_meta_reasoning(self, analysis: dict, session_id: str) -> dict:
+        """Apply MetaReasoningAgent: LLM-based global execution strategy decision.
+        
+        This agent determines: "What's the best execution strategy for this query?"
+        - direct: Use reasoning only, no external tools
+        - research_first: Fetch external data first, then reason
+        - hybrid_parallel: Run reasoning + research in parallel (FusionSkill)
+        """
+        agent = getattr(self, "_meta_reasoning_agent", None)
+        if agent is None:
+            agent = MetaReasoningAgent(self._call_model)
+            self._meta_reasoning_agent = agent
+        
+        return await agent.analyze_strategy(
+            analysis,
+            session_memory=self._memory.snapshot(session_id),
+            session_id=session_id,
+        )
+    
+    async def _apply_parallel_orchestration(
+        self, 
+        meta_reasoning: dict, 
+        analysis: dict,
+    ) -> dict:
+        """Apply ParallelExecutionOrchestrator: Decide when to enable multi-path execution.
+        
+        Enables parallel execution when:
+        - Strategy confidence is low (uncertain about chosen strategy)
+        - Hallucination risk is high (need data validation)
+        - Missing data risk is high (need external context)
+        - Intent ambiguity (multiple valid interpretations)
+        """
+        orchestrator = getattr(self, "_parallel_orchestrator", None)
+        if orchestrator is None:
+            orchestrator = ParallelExecutionOrchestrator(self._call_model)
+            self._parallel_orchestrator = orchestrator
+        
+        return orchestrator.should_enable_parallel_execution(
+            meta_reasoning,
+            analysis,
+            confidence_threshold=0.6,
+        )
+    
+    async def _apply_answer_critique(
+        self,
+        analysis: dict,
+        dag_outputs: dict,
+        synthesized: dict,
+        session_id: str,
+    ) -> dict:
+        """Apply AnswerCriticAgent: Quality control gate before returning answer.
+        
+        Detects:
+        - Hallucinations (claims not in sources)
+        - Missing evidence (unsupported assertions)
+        - Weak reasoning (logic gaps)
+        - Contradictions (internal inconsistencies)
+        - Missing context (needs more data)
+        """
+        agent = getattr(self, "_answer_critic_agent", None)
+        if agent is None:
+            agent = AnswerCriticAgent(self._call_model)
+            self._answer_critic_agent = agent
+        
+        return await agent.critique_output(
+            analysis,
+            dag_outputs,
+            synthesized,
+            session_id=session_id,
+        )
 
     def _get_analyzer(self) -> InputAnalyzer:
         analyzer = getattr(self, "_analyzer", None)
@@ -277,9 +504,6 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
             self._final_response_builder = builder
         return builder
 
-    def _select_final_answer(self, results: dict[str, Any], analysis: AnalysisResult) -> str:
-        return self._get_final_response_builder().select_final_answer(results, analysis)
-
     def _record_execution_metrics(self, execution_trace: list[dict[str, str]]) -> None:
         self._metrics_service.record_execution_trace(execution_trace)
 
@@ -294,6 +518,9 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
                 continue
 
             if node.skill != "research":
+                continue
+
+            if "selected_tool" in node.input:
                 continue
 
             description = str(node.input.get("description", "")).strip() or analysis["normalized_prompt"]

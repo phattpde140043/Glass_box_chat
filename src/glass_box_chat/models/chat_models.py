@@ -11,6 +11,8 @@ from .chat_contract import (
 
 class RunRequest(BaseModel):
     prompt: str = Field(min_length=CHAT_PROMPT_MIN_LENGTH, max_length=CHAT_PROMPT_MAX_LENGTH)
+    sessionId: str = Field(min_length=1)
+    messageId: str = Field(min_length=1)
 
     @field_validator("prompt")
     @classmethod
@@ -18,6 +20,22 @@ class RunRequest(BaseModel):
         trimmed = value.strip()
         if len(trimmed) < CHAT_PROMPT_MIN_LENGTH:
             raise ValueError("prompt cannot be empty")
+        return trimmed
+
+    @field_validator("sessionId")
+    @classmethod
+    def validate_session_id(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("sessionId cannot be empty")
+        return trimmed
+
+    @field_validator("messageId")
+    @classmethod
+    def validate_message_id(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("messageId cannot be empty")
         return trimmed
 
 
@@ -36,6 +54,7 @@ class TraceEvent(BaseModel):
     createdAt: str
     sessionId: str
     sessionLabel: str
+    messageId: str
 
     @field_validator("event")
     @classmethod
