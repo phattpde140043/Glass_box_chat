@@ -53,6 +53,31 @@ MARKET_HINTS = (
     "forex",
 )
 
+LOOKUP_HINTS = (
+    "tra cứu",
+    "tra cuu",
+    "lookup",
+    "search",
+    "find",
+    "information",
+    "thông tin",
+    "tim thong tin",
+    "tìm thông tin",
+)
+
+MARKET_ANALYSIS_HINTS = (
+    "phân tích",
+    "phan tich",
+    "nhận định",
+    "nhan dinh",
+    "xu hướng",
+    "xu huong",
+    "trend",
+    "analysis",
+    "analyze",
+    "outlook",
+)
+
 RESEARCH_HINTS = (
     "nghiên cứu",
     "tra cứu",
@@ -135,6 +160,22 @@ def is_explicit_research_task(text: str) -> bool:
 def is_market_data_text(text: str) -> bool:
     lowered = text.lower()
     return any(token in lowered for token in MARKET_HINTS)
+
+
+def is_lookup_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in LOOKUP_HINTS)
+
+
+def is_market_analysis_text(text: str) -> bool:
+    lowered = text.lower()
+    has_analysis_signal = any(token in lowered for token in MARKET_ANALYSIS_HINTS)
+    has_subject_signal = any(token in lowered for token in MARKET_HINTS)
+    has_time_signal = any(
+        token in lowered
+        for token in ("tháng", "thang", "month", "tuần", "tuan", "week", "quý", "quy", "recent", "gần đây", "gan day")
+    )
+    return has_analysis_signal and (has_subject_signal or has_time_signal)
 
 
 class AutoDAGPlanner:
