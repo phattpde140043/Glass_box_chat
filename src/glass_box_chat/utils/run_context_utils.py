@@ -13,7 +13,7 @@ class RunContext:
 def build_run_context(next_session_index: int | None = None, session_id: str | None = None, message_id: str | None = None) -> RunContext:
     if not message_id:
         raise ValueError("message_id is required")
-
+    
     if session_id is not None:
         return RunContext(
             session_id=session_id,

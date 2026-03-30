@@ -74,7 +74,7 @@ class BaseTool:
                 result.latency_ms = latency_ms
                 result.metadata["attempts"] = attempt + 1
                 return result
-            except asyncio.TimeoutError as e:
+            except asyncio.TimeoutError:
                 last_error = f"timeout after {tool_input.timeout_seconds}s"
             except Exception as e:
                 last_error = str(e)

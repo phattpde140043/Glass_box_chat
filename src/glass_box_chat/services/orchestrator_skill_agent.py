@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from typing import Any
@@ -18,6 +19,7 @@ from .runtime_metrics import RuntimeMetrics
 from .runtime_resilience import NodeCache, ShortTermMemoryStore, classify_error
 from .skill_registry_factory import RegistryFactory, build_default_skill_registry
 from .result_formatting import (
+    classify_source_niche,
     collect_source_details_from_results,
     collect_sources_from_results,
     extract_result_text,
@@ -222,14 +224,15 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
         yield TraceEvent(
             **build_trace_payload(
                 event="thinking",
-                detail={
-                    "phase": "decision_intelligence",
-                    "strategy": meta_reasoning.get("strategy"),
-                    "confidence": meta_reasoning.get("confidence"),
-                    "reason": meta_reasoning.get("reason"),
-                    "risk": meta_reasoning.get("risk", {}),
-                    "parallel_enabled": parallel_config.get("enable_parallel", False),
-                },
+                detail=(
+                    "Decision intelligence completed.\n"
+                    f"Phase: decision_intelligence.\n"
+                    f"Strategy: {meta_reasoning.get('strategy')}.\n"
+                    f"Confidence: {meta_reasoning.get('confidence')}.\n"
+                    f"Reason: {meta_reasoning.get('reason')}.\n"
+                    f"Risk: {meta_reasoning.get('risk', {})}.\n"
+                    f"Parallel enabled: {parallel_config.get('enable_parallel', False)}."
+                ),
                 agent="MetaReasoningAgent",
                 mode=analysis["execution_mode"],
                 session_id=session_id,
@@ -249,6 +252,56 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
                 message_id=message_id,
             )
         )
+
+        # Emit a first-class plan artifact so UI can display generated execution assets.
+        yield TraceEvent(
+            **build_trace_payload(
+                event="artifact_created",
+                detail="Execution plan artifact has been generated.",
+                agent="OrchestratorAgent",
+                mode=analysis["execution_mode"],
+                session_id=session_id,
+                session_label=session_label,
+                message_id=message_id,
+                artifact={
+                    "id": f"artifact-plan-{uuid.uuid4()}",
+                    "type": "plan",
+                    "title": "Execution Plan",
+                    "status": "created",
+                    "content": dag_summary,
+                    "createdAt": time.strftime("%H:%M:%S"),
+                },
+                metadata={
+                    "phase": "planning",
+                    "nodeCount": len(dag),
+                },
+            )
+        )
+
+        for planned_node in dag:
+            yield TraceEvent(
+                **build_trace_payload(
+                    event="node_start",
+                    detail=(
+                        f"Node {planned_node.id} is scheduled for skill '{planned_node.skill}' "
+                        f"with dependencies: {', '.join(planned_node.depends_on) if planned_node.depends_on else 'none'}."
+                    ),
+                    agent="OrchestratorAgent",
+                    branch=planned_node.branch,
+                    mode=analysis["execution_mode"],
+                    session_id=session_id,
+                    session_label=session_label,
+                    message_id=message_id,
+                    metadata={
+                        "nodeId": planned_node.id,
+                        "skill": planned_node.skill,
+                        "deps": planned_node.depends_on,
+                        "branch": planned_node.branch,
+                        "phase": "scheduled",
+                        "startedAtMs": int(time.time() * 1000),
+                    },
+                )
+            )
 
         results: dict[str, Any] = {}
         execution_trace: list[dict[str, str]] = []
@@ -273,6 +326,20 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
 
             yield TraceEvent(
                 **build_trace_payload(
+                    event="subagent_start",
+                    detail=f"Skill agent '{update.skill_name}' started execution for node {update.node.id}.",
+                    agent="OrchestratorAgent",
+                    branch=trace_entry["branch"],
+                    mode=analysis["execution_mode"],
+                    session_id=session_id,
+                    session_label=session_label,
+                    message_id=message_id,
+                    metadata=self._build_trace_metadata(trace_entry, phase="start"),
+                )
+            )
+
+            yield TraceEvent(
+                **build_trace_payload(
                     event="tool_call",
                     detail=build_tool_call_detail(trace_entry),
                     agent="OrchestratorAgent",
@@ -281,6 +348,7 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
                     session_id=session_id,
                     session_label=session_label,
                     message_id=message_id,
+                    metadata=self._build_trace_metadata(trace_entry, phase="call"),
                 )
             )
             for phase_detail in build_tool_phase_details(trace_entry):
@@ -294,6 +362,7 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
                         session_id=session_id,
                         session_label=session_label,
                         message_id=message_id,
+                        metadata=self._build_trace_metadata(trace_entry, phase="progress"),
                     )
                 )
             yield TraceEvent(
@@ -306,15 +375,88 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
                     session_id=session_id,
                     session_label=session_label,
                     message_id=message_id,
+                    metadata=self._build_trace_metadata(trace_entry, phase="result"),
                 )
             )
 
-        final_answer, final_payload = self._get_final_response_builder().build_payload_from_results(results, analysis)
+            yield TraceEvent(
+                **build_trace_payload(
+                    event="node_done",
+                    detail=f"Node {update.node.id} finished with success={trace_entry.get('success') == 'true'}.",
+                    agent="OrchestratorAgent",
+                    branch=trace_entry["branch"],
+                    mode=analysis["execution_mode"],
+                    session_id=session_id,
+                    session_label=session_label,
+                    message_id=message_id,
+                    metadata=self._build_trace_metadata(trace_entry, phase="done"),
+                )
+            )
+
+            yield TraceEvent(
+                **build_trace_payload(
+                    event="subagent_done",
+                    detail=f"Skill agent '{update.skill_name}' completed node {update.node.id}.",
+                    agent="OrchestratorAgent",
+                    branch=trace_entry["branch"],
+                    mode=analysis["execution_mode"],
+                    session_id=session_id,
+                    session_label=session_label,
+                    message_id=message_id,
+                    metadata=self._build_trace_metadata(trace_entry, phase="subagent_done"),
+                )
+            )
+
+            yield TraceEvent(
+                **build_trace_payload(
+                    event="artifact_updated",
+                    detail=f"Evidence artifact updated from node {update.node.id}.",
+                    agent="AnswerSkillAgent",
+                    branch=trace_entry["branch"],
+                    mode=analysis["execution_mode"],
+                    session_id=session_id,
+                    session_label=session_label,
+                    message_id=message_id,
+                    artifact={
+                        "id": f"artifact-evidence-{update.node.id}",
+                        "type": "evidence",
+                        "title": f"Evidence bundle ({update.node.id})",
+                        "status": "updated",
+                        "content": trace_entry.get("output", ""),
+                        "createdAt": time.strftime("%H:%M:%S"),
+                    },
+                    metadata=self._build_trace_metadata(trace_entry, phase="artifact"),
+                )
+            )
+
+        final_answer, final_payload = self._final_response_builder.build_payload_from_results(results, analysis)
+
+        dual_niche_summary = (
+            ((final_payload.get("reasoningQuality") or {}).get("dualNiche") or {}).get("summary")
+            if isinstance(final_payload, dict)
+            else None
+        )
+        if isinstance(dual_niche_summary, str) and dual_niche_summary.strip():
+            yield TraceEvent(
+                **build_trace_payload(
+                    event="thinking",
+                    detail=dual_niche_summary,
+                    agent="OrchestratorAgent",
+                    mode=analysis["execution_mode"],
+                    session_id=session_id,
+                    session_label=session_label,
+                    message_id=message_id,
+                    metadata={
+                        "phase": "dual_niche_analysis",
+                        "success": True,
+                    },
+                )
+            )
         
         # Phase 5b: Quality Control - Answer Critic (NEW)
         synthesized = {
             "text": final_answer,
-            "sources": collect_sources_from_results(results),
+            "sources": collect_source_details_from_results(results),
         }
         critic_verdict = await self._apply_answer_critique(
             analysis,
@@ -322,19 +464,27 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
             synthesized,
             session_id,
         )
+
+        final_answer, final_payload = await self._augment_payload_with_quick_evidence(
+            analysis,
+            final_answer,
+            final_payload,
+            critic_verdict,
+        )
         
         # Emit Critic verdict
         yield TraceEvent(
             **build_trace_payload(
                 event="thinking",
-                detail={
-                    "phase": "quality_control",
-                    "is_safe": critic_verdict.get("is_safe"),
-                    "overall_quality": critic_verdict.get("overall_quality"),
-                    "needs_revision": critic_verdict.get("needs_revision"),
-                    "issues_count": len(critic_verdict.get("issues", [])),
-                    "revision_strategy": critic_verdict.get("revision_strategy"),
-                },
+                detail=(
+                    "Answer critic completed.\n"
+                    "Phase: quality_control.\n"
+                    f"Is safe: {critic_verdict.get('is_safe')}.\n"
+                    f"Overall quality: {critic_verdict.get('overall_quality')}.\n"
+                    f"Needs revision: {critic_verdict.get('needs_revision')}.\n"
+                    f"Issues count: {len(critic_verdict.get('issues', []))}.\n"
+                    f"Revision strategy: {critic_verdict.get('revision_strategy')}."
+                ),
                 agent="AnswerCriticAgent",
                 mode=analysis["execution_mode"],
                 session_id=session_id,
@@ -351,6 +501,31 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
         self._memory.remember(session_id, "critic_verdict", f"quality={critic_verdict.get('overall_quality'):.2f} safe={critic_verdict.get('is_safe')}")
         self._record_execution_metrics(execution_trace)
         self._metrics_service.mark_completed()
+
+        yield TraceEvent(
+            **build_trace_payload(
+                event="artifact_created",
+                detail="Final response artifact has been created.",
+                agent="OrchestratorAgent",
+                mode=analysis["execution_mode"],
+                session_id=session_id,
+                session_label=session_label,
+                message_id=message_id,
+                artifact={
+                    "id": f"artifact-final-{uuid.uuid4()}",
+                    "type": "final_response",
+                    "title": "Final Response",
+                    "status": "final",
+                    "content": final_answer,
+                    "createdAt": time.strftime("%H:%M:%S"),
+                },
+                metadata={
+                    "phase": "finalize",
+                    "success": True,
+                    "sourceCount": len(final_payload.get("sources", [])) if isinstance(final_payload.get("sources", []), list) else 0,
+                },
+            )
+        )
 
         yield TraceEvent(
             **build_trace_payload(
@@ -391,72 +566,36 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
         }
 
     def _analyze_input(self, prompt: str, session_id: str) -> AnalysisResult:
-        return self._get_analyzer().analyze(prompt, session_id)
+        return self._analyzer.analyze(prompt, session_id)
 
     def _apply_search_decision_gate(self, analysis: AnalysisResult, session_id: str) -> AnalysisResult:
-        """Apply SearchDecisionGate: LLM-based decision on whether search/tools needed.
-        
-        This gate answers: "Given this intent, does the user query require live/external data?"
-        Allows graceful degradation: if search not needed, can skip pipeline for faster response.
-        """
-        gate = getattr(self, "_search_decision_gate", None)
-        if gate is None:
-            gate = SearchDecisionGate(
-                self._call_model,
-                lambda sid: self._memory.snapshot(sid),
-            )
-            self._search_decision_gate = gate
-        return gate.analyze_search_need(analysis, session_id)
+        """Apply SearchDecisionGate: decide whether live/external data is needed."""
+        return self._search_decision_gate.analyze_search_need(analysis, session_id)
 
     def _apply_execution_gate(self, analysis: AnalysisResult) -> AnalysisResult:
-        gate = getattr(self, "_execution_gate", None)
-        if gate is None:
-            gate = ExecutionGate(self._call_model)
-            self._execution_gate = gate
-        return gate.decide(analysis)
+        return self._execution_gate.decide(analysis)
 
     async def _apply_meta_reasoning(self, analysis: dict, session_id: str) -> dict:
-        """Apply MetaReasoningAgent: LLM-based global execution strategy decision.
-        
-        This agent determines: "What's the best execution strategy for this query?"
-        - direct: Use reasoning only, no external tools
-        - research_first: Fetch external data first, then reason
-        - hybrid_parallel: Run reasoning + research in parallel (FusionSkill)
-        """
-        agent = getattr(self, "_meta_reasoning_agent", None)
-        if agent is None:
-            agent = MetaReasoningAgent(self._call_model)
-            self._meta_reasoning_agent = agent
-        
-        return await agent.analyze_strategy(
+        """Apply MetaReasoningAgent: decide global execution strategy (direct / research_first / hybrid_parallel)."""
+        result = await self._meta_reasoning_agent.analyze_strategy(
             analysis,
             session_memory=self._memory.snapshot(session_id),
             session_id=session_id,
         )
+        return result.model_dump() if hasattr(result, 'model_dump') else result.dict()
     
     async def _apply_parallel_orchestration(
-        self, 
-        meta_reasoning: dict, 
+        self,
+        meta_reasoning: dict,
         analysis: dict,
     ) -> dict:
-        """Apply ParallelExecutionOrchestrator: Decide when to enable multi-path execution.
-        
-        Enables parallel execution when:
-        - Strategy confidence is low (uncertain about chosen strategy)
-        - Hallucination risk is high (need data validation)
-        - Missing data risk is high (need external context)
-        - Intent ambiguity (multiple valid interpretations)
-        """
-        orchestrator = getattr(self, "_parallel_orchestrator", None)
-        if orchestrator is None:
-            orchestrator = ParallelExecutionOrchestrator(self._call_model)
-            self._parallel_orchestrator = orchestrator
-        
-        return orchestrator.should_enable_parallel_execution(
+        """Apply ParallelExecutionOrchestrator: decide whether to enable multi-path execution."""
+        result = self._parallel_orchestrator.should_enable_parallel_execution(
             meta_reasoning,
             analysis,
             confidence_threshold=0.6,
         )
+        return result.model_dump() if hasattr(result, 'model_dump') else result.dict()
     
     async def _apply_answer_critique(
         self,
@@ -465,47 +604,162 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
         synthesized: dict,
         session_id: str,
     ) -> dict:
-        """Apply AnswerCriticAgent: Quality control gate before returning answer.
-        
-        Detects:
-        - Hallucinations (claims not in sources)
-        - Missing evidence (unsupported assertions)
-        - Weak reasoning (logic gaps)
-        - Contradictions (internal inconsistencies)
-        - Missing context (needs more data)
-        """
-        agent = getattr(self, "_answer_critic_agent", None)
-        if agent is None:
-            agent = AnswerCriticAgent(self._call_model)
-            self._answer_critic_agent = agent
-        
-        return await agent.critique_output(
+        """Apply AnswerCriticAgent: quality-control gate (hallucination / evidence / contradiction checks)."""
+        result = await self._answer_critic_agent.critique_output(
             analysis,
             dag_outputs,
             synthesized,
             session_id=session_id,
         )
-
-    def _get_analyzer(self) -> InputAnalyzer:
-        analyzer = getattr(self, "_analyzer", None)
-        if analyzer is None:
-            analyzer = InputAnalyzer(
-                self._call_model,
-                lambda sid: self._memory.snapshot(sid),
-                self._STOPWORDS,
-            )
-            self._analyzer = analyzer
-        return analyzer
-
-    def _get_final_response_builder(self) -> FinalResponseBuilder:
-        builder = getattr(self, "_final_response_builder", None)
-        if builder is None:
-            builder = FinalResponseBuilder()
-            self._final_response_builder = builder
-        return builder
+        return result.model_dump() if hasattr(result, 'model_dump') else result.dict()
 
     def _record_execution_metrics(self, execution_trace: list[dict[str, str]]) -> None:
         self._metrics_service.record_execution_trace(execution_trace)
+
+    @staticmethod
+    def _build_trace_metadata(trace_entry: dict[str, str], phase: str) -> dict[str, object]:
+        citations_raw = trace_entry.get("citations", "none")
+        citations = [] if citations_raw in ("none", "", None) else [item for item in citations_raw.split(",") if item]
+        return {
+            "nodeId": trace_entry.get("node_id"),
+            "skill": trace_entry.get("skill_name"),
+            "deps": [] if trace_entry.get("depends_on") in (None, "-") else str(trace_entry["depends_on"]).split(","),
+            "score": trace_entry.get("route_score"),
+            "provider": trace_entry.get("provider"),
+            "sourceCount": int(str(trace_entry.get("source_count", "0") or "0")),
+            "citationCount": int(str(trace_entry.get("citation_count", "0") or "0")),
+            "freshness": trace_entry.get("freshness"),
+            "fallbackUsed": trace_entry.get("fallback_used") == "true",
+            "cacheHit": trace_entry.get("cache_hit") == "true",
+            "durationMs": int(str(trace_entry.get("duration_ms", "0") or "0")) if str(trace_entry.get("duration_ms", "0")).isdigit() else 0,
+            "attempts": int(str(trace_entry.get("attempts", "0") or "0")) if str(trace_entry.get("attempts", "0")).isdigit() else 0,
+            "success": trace_entry.get("success") == "true",
+            "citations": citations,
+            "branch": trace_entry.get("branch"),
+            "phase": phase,
+        }
+
+    async def _augment_payload_with_quick_evidence(
+        self,
+        analysis: AnalysisResult,
+        final_answer: str,
+        final_payload: dict[str, Any],
+        critic_verdict: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        quality = final_payload.get("reasoningQuality") if isinstance(final_payload, dict) else None
+        coverage_ratio = float((quality or {}).get("coverageRatio", 1.0) or 1.0)
+
+        dual_niche = (quality or {}).get("dualNiche") if isinstance(quality, dict) else None
+        quant_sources = int((((dual_niche or {}).get("quantitative") or {}).get("sourceCount", 0) or 0))
+        qual_sources = int((((dual_niche or {}).get("qualitative") or {}).get("sourceCount", 0) or 0))
+        niche_balance = float((dual_niche or {}).get("niche_balance", 1.0) or 1.0)
+
+        missing_niche: str | None = None
+        if quant_sources == 0 and qual_sources > 0:
+            missing_niche = "quantitative"
+        elif qual_sources == 0 and quant_sources > 0:
+            missing_niche = "qualitative"
+        elif niche_balance < 0.65 and quant_sources != qual_sources:
+            missing_niche = "quantitative" if quant_sources < qual_sources else "qualitative"
+
+        needs_evidence_issue = False
+        for issue in critic_verdict.get("issues", []) if isinstance(critic_verdict, dict) else []:
+            issue_type = str(issue.get("type", "")).strip().lower() if isinstance(issue, dict) else ""
+            if issue_type in {"needs_evidence", "potential_hallucination", "missing_context"}:
+                needs_evidence_issue = True
+                break
+
+        if coverage_ratio >= 0.55 and not needs_evidence_issue and not missing_niche:
+            return final_answer, final_payload
+
+        query = str(analysis.get("normalized_prompt", "")).strip()
+        if not query:
+            return final_answer, final_payload
+
+        search_batches: list[SearchResultBatch] = []
+        try:
+            if coverage_ratio < 0.55 or needs_evidence_issue:
+                search_batches.append(await self._search_provider.search(query, limit=2))
+            if missing_niche:
+                niche_hint = (
+                    "official data statistics metrics report"
+                    if missing_niche == "quantitative"
+                    else "expert analysis outlook sentiment commentary"
+                )
+                search_batches.append(await self._search_provider.search(f"{query} {niche_hint}", limit=3))
+        except Exception:
+            return final_answer, final_payload
+
+        documents: list[SearchDocument] = []
+        for batch in search_batches:
+            documents.extend(batch.documents)
+        if not documents:
+            return final_answer, final_payload
+
+        source_urls = final_payload.get("sources") if isinstance(final_payload.get("sources"), list) else []
+        source_details = final_payload.get("sourceDetails") if isinstance(final_payload.get("sourceDetails"), list) else []
+        evidence_ledger = final_payload.get("evidenceLedger") if isinstance(final_payload.get("evidenceLedger"), list) else []
+
+        changed = False
+        added_quant = 0
+        added_qual = 0
+        for doc in documents:
+            doc_niche = classify_source_niche(doc.url, doc.snippet)
+            if missing_niche and doc_niche != missing_niche:
+                continue
+            if doc.url not in source_urls:
+                source_urls.append(doc.url)
+                changed = True
+            if not any(isinstance(item, dict) and item.get("url") == doc.url for item in source_details):
+                source_details.append(
+                    {
+                        "title": doc.title,
+                        "url": doc.url,
+                        "freshness": doc.freshness,
+                    }
+                )
+                changed = True
+            if not any(isinstance(item, dict) and item.get("source") == doc.url for item in evidence_ledger):
+                evidence_ledger.append(
+                    {
+                        "type": "quick_retrieval",
+                        "claim": doc.snippet[:220],
+                        "source": doc.url,
+                        "evidence_item_id": f"quick_{abs(hash(doc.url))}",
+                        "niche": doc_niche,
+                    }
+                )
+                changed = True
+                if doc_niche == "quantitative":
+                    added_quant += 1
+                elif doc_niche == "qualitative":
+                    added_qual += 1
+
+        if not changed:
+            return final_answer, final_payload
+
+        final_payload["sources"] = source_urls
+        final_payload["sourceDetails"] = source_details
+        final_payload["evidenceLedger"] = evidence_ledger
+
+        if isinstance(quality, dict) and isinstance(quality.get("dualNiche"), dict):
+            dual_niche_payload = quality["dualNiche"]
+            quant_block = dual_niche_payload.get("quantitative") if isinstance(dual_niche_payload.get("quantitative"), dict) else {}
+            qual_block = dual_niche_payload.get("qualitative") if isinstance(dual_niche_payload.get("qualitative"), dict) else {}
+
+            quant_block["sourceCount"] = int(quant_block.get("sourceCount", 0) or 0) + added_quant
+            quant_block["evidenceCount"] = int(quant_block.get("evidenceCount", 0) or 0) + added_quant
+            qual_block["sourceCount"] = int(qual_block.get("sourceCount", 0) or 0) + added_qual
+            qual_block["evidenceCount"] = int(qual_block.get("evidenceCount", 0) or 0) + added_qual
+
+            total = max(int(quant_block["sourceCount"] + qual_block["sourceCount"]), 1)
+            quant_ratio = float(quant_block["sourceCount"]) / float(total)
+            dual_niche_payload["quantitative"] = quant_block
+            dual_niche_payload["qualitative"] = qual_block
+            dual_niche_payload["niche_balance"] = round(1.0 - abs(0.5 - quant_ratio), 2)
+
+        final_payload["content"] = final_answer
+        return final_answer, final_payload
 
     @staticmethod
     def _apply_tool_hints(dag: list[DAGNode], analysis: AnalysisResult) -> None:

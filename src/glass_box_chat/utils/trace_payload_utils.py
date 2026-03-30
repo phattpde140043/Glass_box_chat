@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 
 from .time_utils import now_hms
 
@@ -13,9 +14,11 @@ def build_trace_payload(
     message_id: str,
     branch: str = "main",
     mode: str = "sequential",
-) -> dict[str, str]:
+    metadata: dict[str, Any] | None = None,
+    artifact: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a standardized trace payload shared by stream and mock engine flows."""
-    return {
+    payload = {
         "id": f"trace-{uuid.uuid4()}",
         "event": event,
         "detail": detail,
@@ -27,3 +30,8 @@ def build_trace_payload(
         "sessionLabel": session_label,
         "messageId": message_id,
     }
+    if metadata is not None:
+        payload["metadata"] = metadata
+    if artifact is not None:
+        payload["artifact"] = artifact
+    return payload

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 
 @dataclass
@@ -31,6 +32,43 @@ class ToolAnalyzer:
         "exchange rate",
         "forex",
     )
+
+    LOCAL_DISCOVERY_HINTS = (
+        "restaurant",
+        "nhà hàng",
+        "nha hang",
+        "quán ăn",
+        "quan an",
+        "hotel",
+        "khách sạn",
+        "khach san",
+        "resort",
+        "homestay",
+        "du lịch",
+        "du lich",
+        "travel",
+        "địa điểm",
+        "dia diem",
+        "điểm đến",
+        "diem den",
+        "attraction",
+        "things to do",
+        "near me",
+    )
+
+    @staticmethod
+    def _contains_hint(text: str, hints: tuple[str, ...]) -> bool:
+        lowered = text.lower()
+        tokens = {token for token in re.split(r"[^\wÀ-ỹ]+", lowered) if token}
+        for hint in hints:
+            normalized_hint = hint.lower()
+            if " " in normalized_hint:
+                if normalized_hint in lowered:
+                    return True
+                continue
+            if normalized_hint in tokens:
+                return True
+        return False
     
     @staticmethod
     def suggest_tool(query: str, context: str = "") -> ToolSuggestion:
@@ -50,12 +88,20 @@ class ToolAnalyzer:
             return ToolSuggestion(tool_name="weather", confidence=0.88, reason="Weather query detected")
 
         # Market data (gold/crypto/fx)
-        if any(kw in combined_text for kw in ToolAnalyzer.MARKET_HINTS):
+        if ToolAnalyzer._contains_hint(combined_text, ToolAnalyzer.MARKET_HINTS):
             return ToolSuggestion(tool_name="finance", confidence=0.96, reason="Market price query detected")
         
         # News
         if any(kw in combined_text for kw in ["news", "tin tức", "headline", "mới nhất"]):
             return ToolSuggestion(tool_name="news_api", confidence=0.86, reason="News query detected")
+
+        # Local/travel discovery
+        if ToolAnalyzer._contains_hint(combined_text, ToolAnalyzer.LOCAL_DISCOVERY_HINTS):
+            return ToolSuggestion(
+                tool_name="local_search",
+                confidence=0.9,
+                reason="Local discovery query detected",
+            )
         
         # Calculator
         calc_keywords = ["calculate", "tính", "math", "toán", "equation"]
@@ -100,6 +146,14 @@ class ToolAnalyzer:
                     tool_name="news_api",
                     confidence=0.45,
                     reason="Optional market news context",
+                )
+            )
+        elif primary.tool_name == "local_search":
+            suggestions.append(
+                ToolSuggestion(
+                    tool_name="web_search",
+                    confidence=0.4,
+                    reason="Additional supporting links",
                 )
             )
         

@@ -46,7 +46,7 @@ class MockTraceEngine(TraceEngineProtocol):
             TraceEvent(
                 **build_trace_payload(
                     event="tool_call",
-                    detail=f"Gọi AgentAnalyzer cho vấn đề {branch}: {issue}. Dự kiến bóc tách ý 1, ý 2, ý 3.",
+                    detail=f"Calling AgentAnalyzer for issue {branch}: {issue}. Expected breakdown: point 1, point 2, point 3.",
                     agent="AgentAnalyzer",
                     branch=branch,
                     mode=mode,
@@ -62,7 +62,7 @@ class MockTraceEngine(TraceEngineProtocol):
             TraceEvent(
                 **build_trace_payload(
                     event="tool_result",
-                    detail=f"AgentAnalyzer({branch}) trả về: ý 1 là khái niệm cốt lõi, ý 2 là phạm vi áp dụng, ý 3 là rủi ro cần kiểm soát.",
+                    detail=f"AgentAnalyzer({branch}) returned: point 1 is the core concept, point 2 is the scope of application, point 3 is the risk to control.",
                     agent="AgentAnalyzer",
                     branch=branch,
                     mode=mode,
@@ -78,7 +78,7 @@ class MockTraceEngine(TraceEngineProtocol):
             TraceEvent(
                 **build_trace_payload(
                     event="tool_call",
-                    detail=f"Tiếp tục gọi SearchWebAgent để xác minh thông tin cho vấn đề {branch}. Đang searching các nguồn liên quan...",
+                    detail=f"Continuing with SearchWebAgent to verify information for issue {branch}. Searching relevant sources...",
                     agent="SearchWebAgent",
                     branch=branch,
                     mode=mode,
@@ -94,7 +94,7 @@ class MockTraceEngine(TraceEngineProtocol):
             TraceEvent(
                 **build_trace_payload(
                     event="tool_result",
-                    detail=f"SearchWebAgent({branch}) tìm được 3 ý chính và 2 ví dụ thực tế để hỗ trợ phần tổng hợp cuối cùng.",
+                    detail=f"SearchWebAgent({branch}) found 3 main points and 2 real-world examples to support the final synthesis.",
                     agent="SearchWebAgent",
                     branch=branch,
                     mode=mode,
@@ -114,7 +114,7 @@ class MockTraceEngine(TraceEngineProtocol):
         yield TraceEvent(
             **build_trace_payload(
                 event="thinking",
-                detail=f"Tôi đang phân tích câu hỏi của bạn. Người dùng đang hỏi {len(issues)} vấn đề: {' | '.join(issues)}. Ưu tiên làm rõ vấn đề đầu tiên trước.",
+                detail=f"Analyzing the user's request. The user asked about {len(issues)} issues: {' | '.join(issues)}. Prioritizing the first issue first.",
                 agent="CoordinatorAgent",
                 mode=mode,
                 session_id=session_id,
@@ -127,7 +127,7 @@ class MockTraceEngine(TraceEngineProtocol):
         yield TraceEvent(
             **build_trace_payload(
                 event="thinking",
-                detail=f"Kế hoạch xử lý: {'chạy song song A/B/C nếu tài nguyên cho phép' if mode == 'parallel' else 'xử lý tuần tự từng vấn đề'}.",
+                detail=f"Execution plan: {'run branches A/B/C in parallel if resources allow' if mode == 'parallel' else 'process each issue sequentially'}.",
                 agent="CoordinatorAgent",
                 mode=mode,
                 session_id=session_id,
@@ -155,7 +155,7 @@ class MockTraceEngine(TraceEngineProtocol):
         yield TraceEvent(
             **build_trace_payload(
                 event="waiting",
-                detail="Đang đợi AgentSummarizer tổng hợp tất cả kết quả từ các nhánh vấn đề.",
+                detail="Waiting for AgentSummarizer to combine all results from the issue branches.",
                 agent="AgentSummarizer",
                 mode=mode,
                 session_id=session_id,
@@ -168,7 +168,7 @@ class MockTraceEngine(TraceEngineProtocol):
         yield TraceEvent(
             **build_trace_payload(
                 event="done",
-                detail="Đã hoàn tất vòng phân tích mock. Sẵn sàng gửi kết quả tổng hợp về khung chat.",
+                detail="Mock analysis cycle completed. Ready to send the synthesized result back to the chat UI.",
                 agent="CoordinatorAgent",
                 mode=mode,
                 session_id=session_id,
