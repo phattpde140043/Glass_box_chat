@@ -692,6 +692,33 @@ class AnalysisSkill(BaseLLMSkill):
         return "neutral"
 
     @staticmethod
+    def _ensure_structured_reasoning_text(
+        summary: str,
+        signals: list[str],
+        limitations: list[str],
+        evidence_urls: list[str],
+    ) -> str:
+        lowered = summary.lower()
+        has_conclusion = "ket luan" in lowered
+        has_reasoning = "lap luan" in lowered
+        has_evidence = "dan chung" in lowered
+        has_limits = "gioi han" in lowered
+
+        if has_conclusion and has_reasoning and has_evidence and has_limits:
+            return summary
+
+        conclusion = summary.strip()[:500] or "Chua the ket luan chac chan do bo du lieu con han che."
+        reasoning = "; ".join(signals[:4]) if signals else "Can them tin hieu doc lap de cung co lap luan."
+        evidence = "; ".join(evidence_urls[:4]) if evidence_urls else "Chua co URL dan chung ro rang."
+        limits = "; ".join(limitations[:3]) if limitations else "Do phu data con han che."
+        return (
+            f"Ket luan: {conclusion}\n"
+            f"Lap luan: {reasoning}\n"
+            f"Dan chung da dung: {evidence}\n"
+            f"Gioi han/gia dinh: {limits}"
+        )
+
+    @staticmethod
     def _safe_float(value: object) -> float | None:
         try:
             return float(value)
@@ -909,11 +936,11 @@ class AnalysisSkill(BaseLLMSkill):
             f"Task phan tich: {task_description}\n"
             f"Memory gan day:\n{context.recent_memory or '- none'}\n"
             f"Evidence tong hop:\n{evidence_block}\n\n"
-            "Tra ve 4 muc trong van ban thuong:\n"
+            "Tra ve DUNG format 4 muc trong van ban thuong:\n"
             "1) Ket luan xu huong\n"
-            "2) Tin hieu/dong luc chinh\n"
-            "3) Gia dinh/ngoai le\n"
-            "4) Gioi han du lieu va muc do chac chan"
+            "2) Lap luan chinh\n"
+            "3) Dan chung da dung (moi y gan voi nguon URL cu the)\n"
+            "4) Gioi han/gia dinh va muc do chac chan"
         )
         result = await self._generate(prompt)
         if not result.success:
@@ -969,6 +996,17 @@ class AnalysisSkill(BaseLLMSkill):
                 "Ket luan duoi day chi la nhan dinh tam thoi do do phu du lieu chua cao.",
                 *assumptions,
             ]
+
+        evidence_urls = []
+        for payload in research_payloads:
+            for source in payload.sources:
+                if source.url not in evidence_urls:
+                    evidence_urls.append(source.url)
+                if len(evidence_urls) >= 6:
+                    break
+            if len(evidence_urls) >= 6:
+                break
+        summary = self._ensure_structured_reasoning_text(summary, signals, limitations, evidence_urls)
 
         payload = AnalysisResultEnvelopeModel(
             kind="analysis_result",
@@ -1211,12 +1249,20 @@ class SynthesizerSkill(BaseLLMSkill):
 
     async def execute(self, context: SkillContext) -> SkillResult:
         deps_text = format_dependency_outputs(context.dependency_outputs)
+        synthesis_task = str(context.input.get("description", "")).strip().lower()
+        local_or_travel_synthesis = any(
+            token in synthesis_task
+            for token in ("verified local place", "local place", "travel", "itinerary", "địa điểm", "du lịch", "lich trinh")
+        )
         research_payloads = [
             payload for payload in (parse_research_result(value) for value in context.dependency_outputs.values()) if payload is not None
         ]
         analysis_payloads = [
             payload for payload in (parse_analysis_result(value) for value in context.dependency_outputs.values()) if payload is not None
         ]
+
+        if local_or_travel_synthesis and not research_payloads:
+            return SkillResult(success=False, error="no_dependency_evidence", metadata={"error_type": "permanent"})
 
         if not context.dependency_outputs and not research_payloads and not analysis_payloads:
             # Fallback to pure knowledge answer when synthesis is invoked without evidence.
@@ -1307,7 +1353,8 @@ class SynthesizerSkill(BaseLLMSkill):
             "Bạn là SynthesizerSkill. Hãy hợp nhất các kết quả trung gian thành 1 câu trả lời cuối cùng, "
             "mạch lạc, không lặp ý, bằng tiếng Việt. Nếu có dữ kiện từ research, chỉ dùng các dữ kiện có trong evidence đã dẫn nguồn. "
             "BẮT BUỘC: không được tự thêm fact ngoài evidence; khi có mâu thuẫn giữa các nguồn, phải nêu rõ xung đột và mức độ chắc chắn. "
-            "BẮT BUỘC: giữ hoặc bổ sung phần Nguon tham khao với URL đã có.\n\n"
+            "BẮT BUỘC: giữ hoặc bổ sung phần Nguon tham khao với URL đã có. "
+            "BẮT BUỘC: có mục 'Dan chung da su dung' và mỗi ý phải kèm URL nguồn tương ứng.\n\n"
             f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
             f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
             f"Dependency outputs:\n{deps_text or '- none'}\n"
@@ -1524,3 +1571,416 @@ class FusionSkill(BaseLLMSkill):
             "used_tool": "none",
         }
         return result
+
+
+class GeoIntentSkill:
+    metadata = SkillMetadata(
+        name="geo_intent",
+        description="Extract geographic constraints (location, budget, companions, preferences) from local/travel queries.",
+        examples=["nhà hàng ở Đà Nẵng", "khách sạn gần biển Nha Trang", "lịch trình 2 ngày Đà Lạt"],
+        priority_weight=0.22,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1},
+            },
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    _LOCATION_PATTERNS = (
+        r"(?:ở|o|at|in)\s+([A-Za-zÀ-ỹ\s]+)",
+        r"(?:tại|tai)\s+([A-Za-zÀ-ỹ\s]+)",
+        r"(?:gần|gan|near)\s+([A-Za-zÀ-ỹ\s]+)",
+    )
+
+    _BUDGET_HINTS = (
+        "rẻ",
+        "re",
+        "bình dân",
+        "binh dan",
+        "cheap",
+        "luxury",
+        "cao cấp",
+        "cao cap",
+        "mid-range",
+        "tầm trung",
+        "tam trung",
+    )
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        text = str(input_data.get("description", "")).lower()
+        return any(
+            token in text
+            for token in (
+                "nhà hàng",
+                "nha hang",
+                "restaurant",
+                "hotel",
+                "khách sạn",
+                "khach san",
+                "du lịch",
+                "du lich",
+                "travel",
+                "itinerary",
+            )
+        )
+
+    def execute_sync(self, text: str) -> dict[str, object]:
+        lowered = text.lower()
+        location = ""
+        for pattern in self._LOCATION_PATTERNS:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                location = re.sub(r"\s+", " ", match.group(1)).strip(" .,")
+                break
+
+        budget = "unspecified"
+        for hint in self._BUDGET_HINTS:
+            if hint in lowered:
+                budget = hint
+                break
+
+        interests = []
+        for token in ("ẩm thực", "am thuc", "biển", "bien", "museum", "bảo tàng", "bao tang", "family", "couple"):
+            if token in lowered and token not in interests:
+                interests.append(token)
+
+        days = "unspecified"
+        day_match = re.search(r"(\d+)\s*(?:ngày|ngay|days?)", lowered)
+        if day_match:
+            days = f"{day_match.group(1)}d"
+
+        summary = (
+            f"Đã nhận diện yêu cầu địa điểm. Location={location or 'unspecified'}, "
+            f"budget={budget}, duration={days}, interests={', '.join(interests) if interests else 'unspecified'}."
+        )
+
+        return {
+            "summary": summary,
+            "geo_intent": {
+                "location": location,
+                "budget": budget,
+                "duration": days,
+                "interests": interests,
+            },
+        }
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        description = str(context.input.get("description", "")).strip()
+        return SkillResult(success=True, data=self.execute_sync(description), metadata={"intent": "local_discovery"})
+
+
+class LocalDiscoverySkill(BaseLLMSkill):
+    metadata = SkillMetadata(
+        name="local_discovery",
+        description="Discover local places (restaurants/hotels/attractions) with evidence-based shortlist.",
+        examples=["best restaurants in Da Nang", "khách sạn gần biển Nha Trang", "địa điểm đi chơi ở Hà Nội"],
+        priority_weight=0.3,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1},
+            },
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    def __init__(self, model_source: SupportsCallModel | Callable[[str], str], search_provider: SearchProvider) -> None:
+        super().__init__(model_source)
+        self._search_provider = search_provider
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        text = str(input_data.get("description", "")).lower()
+        return any(
+            token in text
+            for token in (
+                "nhà hàng",
+                "nha hang",
+                "restaurant",
+                "hotel",
+                "khách sạn",
+                "khach san",
+                "resort",
+                "du lịch",
+                "travel",
+                "địa điểm",
+                "attraction",
+            )
+        )
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        query = str(context.input.get("description", "")).strip()
+        started_at = time.perf_counter()
+
+        batch: SearchResultBatch | None = None
+        if context.selected_tool is not None:
+            try:
+                from .tools import ToolInput
+
+                tool_output = await context.selected_tool.execute(ToolInput(query=query, limit=6))
+                if tool_output.success:
+                    batch = ResearchSkill._build_search_batch_from_tool_output(context.selected_tool.name, tool_output)
+            except Exception:
+                batch = None
+
+        if batch is None:
+            batch = await self._search_provider.search(query, limit=6)
+
+        if not batch.documents:
+            return SkillResult(success=False, error="no_local_places_found", metadata={"error_type": "permanent"})
+
+        ranked_docs = rank_documents_for_query(query, batch.documents, limit=6)
+        sources = [
+            ResearchSourceModel(
+                title=doc.title,
+                snippet=doc.snippet,
+                url=doc.url,
+                freshness=doc.freshness,
+                published_at=doc.published_at,
+                reliability=doc.reliability,
+                provider=doc.provider,
+            )
+            for doc in ranked_docs
+        ]
+
+        shortlist_lines = [
+            f"{idx + 1}. {doc.title} - {doc.snippet[:120]}"
+            for idx, doc in enumerate(ranked_docs[:5])
+        ]
+        summary = "Top local options đã được tổng hợp:\n" + "\n".join(shortlist_lines)
+
+        payload = ResearchResultEnvelopeModel(
+            kind="research_result",
+            summary=summary,
+            grounded=True,
+            confidence=batch.confidence,
+            citations=[item.url for item in sources],
+            sources=sources,
+            evidence=[
+                EvidenceModel(
+                    content=item.snippet,
+                    source=item.url,
+                    timestamp=item.published_at,
+                    reliability=item.reliability,
+                    provider=item.provider,
+                )
+                for item in sources
+            ],
+        ).model_dump()
+
+        return SkillResult(
+            success=True,
+            data=payload,
+            metadata={
+                "provider": batch.provider,
+                "source_count": len(ranked_docs),
+                "freshness": ranked_docs[0].freshness,
+                "citation_count": len({doc.url for doc in ranked_docs}),
+                "citations": ",".join(doc.url for doc in ranked_docs),
+                "fallback_used": batch.fallback_used,
+                "latency_ms": batch.latency_ms or int((time.perf_counter() - started_at) * 1000),
+                "confidence": batch.confidence,
+                "intent": "local_discovery",
+                "providers_tried": ",".join(batch.providers_tried or []),
+                "cache_ttl_seconds": batch.cache_ttl_seconds,
+                "used_tool": context.selected_tool.name if context.selected_tool is not None else "none",
+            },
+        )
+
+
+class PlaceVerificationSkill:
+    metadata = SkillMetadata(
+        name="place_verification",
+        description="Verify and deduplicate place candidates, then produce a trusted shortlist.",
+        examples=["verify local places", "deduplicate hotels", "cross-check attractions"],
+        priority_weight=0.24,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1},
+            },
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        _ = input_data
+        return True
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        local_raw = context.dependency_outputs.get("local-search")
+        local_payload = parse_research_result(local_raw)
+        if local_payload is None:
+            text = extract_result_text(local_raw).strip()
+            if not text or text.startswith("ERROR:"):
+                return SkillResult(success=False, error="local_evidence_missing", metadata={"error_type": "permanent"})
+            return SkillResult(success=False, error="local_evidence_missing", metadata={"error_type": "permanent"})
+
+        seen_titles: set[str] = set()
+        verified: list[dict[str, object]] = []
+        for source in local_payload.sources:
+            normalized_title = re.sub(r"\s+", " ", source.title.strip().lower())
+            if normalized_title in seen_titles:
+                continue
+            seen_titles.add(normalized_title)
+            verified.append(
+                {
+                    "name": source.title,
+                    "url": source.url,
+                    "snippet": source.snippet,
+                    "provider": source.provider or "unknown",
+                    "freshness": source.freshness,
+                    "reliability": source.reliability,
+                }
+            )
+            if len(verified) >= 5:
+                break
+
+        if not verified:
+            return SkillResult(success=False, error="no_local_places_found", metadata={"error_type": "permanent"})
+
+        summary_lines = [f"{idx + 1}. {item['name']} ({item['provider']})" for idx, item in enumerate(verified)]
+        summary = "Danh sách địa điểm đã xác thực:\n" + "\n".join(summary_lines) if summary_lines else "Không có địa điểm đủ điều kiện xác thực."
+
+        return SkillResult(
+            success=True,
+            data={
+                "summary": summary,
+                "verified_places": verified,
+            },
+            metadata={
+                "provider": "place_verification",
+                "source_count": len(verified),
+                "citation_count": len(verified),
+                "confidence": round(min(0.92, 0.45 + len(verified) * 0.08), 2),
+                "intent": "local_discovery",
+                "used_tool": "none",
+            },
+        )
+
+
+class ReviewConsensusSkill:
+    metadata = SkillMetadata(
+        name="review_consensus",
+        description="Extract practical pros/cons consensus from local place snippets.",
+        examples=["review consensus for restaurants", "hotel pros and cons"],
+        priority_weight=0.21,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1},
+            },
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    _POSITIVE_HINTS = ("ngon", "sạch", "đẹp", "friendly", "good", "great", "view", "tiện", "clean", "excellent")
+    _NEGATIVE_HINTS = ("đắt", "dong", "ồn", "noisy", "bad", "poor", "xa", "far", "chậm", "wait")
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        _ = input_data
+        return True
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        local_payload = parse_research_result(context.dependency_outputs.get("local-search"))
+        if local_payload is None or not local_payload.sources:
+            return SkillResult(success=False, error="local_evidence_missing", metadata={"error_type": "permanent"})
+
+        pros: list[str] = []
+        cons: list[str] = []
+        for source in local_payload.sources:
+            snippet = source.snippet.lower()
+            if any(token in snippet for token in self._POSITIVE_HINTS) and source.title not in pros:
+                pros.append(source.title)
+            if any(token in snippet for token in self._NEGATIVE_HINTS) and source.title not in cons:
+                cons.append(source.title)
+
+        pros_preview = ", ".join(pros[:4]) if pros else "chưa rõ"
+        cons_preview = ", ".join(cons[:4]) if cons else "không thấy vấn đề nổi bật"
+        summary = f"Consensus review: Ưu điểm nổi bật: {pros_preview}. Hạn chế thường gặp: {cons_preview}."
+
+        return SkillResult(
+            success=True,
+            data={
+                "summary": summary,
+                "pros": pros[:6],
+                "cons": cons[:6],
+            },
+            metadata={
+                "provider": "review_consensus",
+                "source_count": len(local_payload.sources),
+                "confidence": round(min(0.85, 0.4 + len(local_payload.sources) * 0.06), 2),
+                "intent": "local_discovery",
+            },
+        )
+
+
+class ItineraryPlannerSkill(BaseLLMSkill):
+    metadata = SkillMetadata(
+        name="itinerary_planner",
+        description="Create a concise travel itinerary from verified local places and constraints.",
+        examples=["lịch trình 2 ngày Đà Lạt", "2-day Hanoi itinerary"],
+        priority_weight=0.25,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1},
+            },
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        text = str(input_data.get("description", "")).lower()
+        return any(token in text for token in ("itinerary", "lịch trình", "lich trinh", "du lịch", "travel"))
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        prompt = str(context.input.get("description", "")).strip()
+        geo_text = extract_result_text(context.dependency_outputs.get("geo-intent"))
+        verified_payload = context.dependency_outputs.get("place-verify")
+        verified_text = extract_result_text(verified_payload)
+
+        verified_places: list[dict[str, object]] = []
+        if isinstance(verified_payload, dict):
+            raw_places = verified_payload.get("verified_places")
+            if isinstance(raw_places, list):
+                verified_places = [item for item in raw_places if isinstance(item, dict)]
+
+        if not verified_places or str(verified_text).strip().startswith("ERROR:"):
+            return SkillResult(
+                success=False,
+                error="no_verified_places_for_itinerary",
+                metadata={"error_type": "permanent", "intent": "travel_planning"},
+            )
+
+        llm_prompt = (
+            "Bạn là ItineraryPlannerSkill. Tạo lịch trình ngắn gọn, thực dụng, theo khung giờ sáng/chiều/tối. "
+            "Chỉ dùng địa điểm có trong evidence, không bịa thêm địa điểm mới. Ưu tiên tiếng Việt.\n\n"
+            f"Prompt người dùng: {prompt}\n"
+            f"Geo constraints: {geo_text or '- none'}\n"
+            f"Verified places:\n{verified_text or '- none'}\n"
+        )
+
+        result = await self._generate(llm_prompt)
+        if not result.success:
+            return result
+
+        itinerary = extract_result_text(result.data).strip() or "Chưa đủ dữ liệu để tạo lịch trình chi tiết."
+        return SkillResult(
+            success=True,
+            data={
+                "summary": itinerary,
+                "itinerary": itinerary,
+            },
+            metadata={
+                "provider": "itinerary_planner",
+                "confidence": 0.72,
+                "intent": "travel_planning",
+            },
+        )

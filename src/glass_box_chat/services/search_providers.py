@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -47,7 +47,7 @@ class LocationSemanticExtractor(Protocol):
     def extract_location(self, text: str) -> str | None: ...
 
 
-SearchIntent = Literal["weather_live", "news_live", "market_live", "general_research"]
+SearchIntent = Literal["weather_live", "news_live", "market_live", "local_discovery", "travel_planning", "general_research"]
 
 _COMMODITY_SUBJECT_HINTS: dict[str, tuple[str, ...]] = {
     "coffee": ("coffee", "cà phê", "ca phe", "cafe", "arabica", "robusta"),
@@ -313,12 +313,75 @@ def is_commodity_query(query: str) -> bool:
 
 def detect_search_intent(query: str) -> SearchIntent:
     lowered = query.lower()
-    if any(token in lowered for token in ("weather", "thời tiết", "thoi tiet", "forecast", "nhiệt độ", "nhiet do")):
+    
+    # Check high-priority intents FIRST to avoid false positives from location mentions
+    if any(token in lowered for token in ("weather", "thời tiết", "thoi tiet", "forecast", "dự báo", "du bao", "nhiệt độ", "nhiet do")):
         return "weather_live"
     if any(token in lowered for token in ("news", "tin tức", "tin tuc", "headline", "mới nhất", "moi nhat")):
         return "news_live"
-    if any(token in lowered for token in ("stock", "market", "crypto", "gia vang", "chứng khoán", "chung khoan", "coffee", "cà phê", "ca phe", "cafe", "arabica", "robusta", "commodity", "nông sản", "nong san", "pepper")):
+    if any(token in lowered for token in ("stock", "market", "crypto", "gia vang", "giá vàng", "gold price", "xau", "xauusd", "bitcoin", "btc", "ethereum", "eth", "tỷ giá", "ty gia", "exchange rate", "forex", "chứng khoán", "chung khoan", "coffee", "cà phê", "ca phe", "cafe", "arabica", "robusta", "commodity", "nông sản", "nong san", "pepper", "hồ tiêu", "ho tieu")):
         return "market_live"
+    
+    # Then check local_discovery and travel_planning
+    if any(
+        token in lowered
+        for token in (
+            "nhà hàng",
+            "nha hang",
+            "restaurant",
+            "quán ăn",
+            "quan an",
+            "khách sạn",
+            "khach san",
+            "hotel",
+            "resort",
+            "homestay",
+            "attraction",
+            "địa điểm",
+            "dia diem",
+            "điểm đến",
+            "diem den",
+            "du lịch",
+            "du lich",
+            "travel",
+            "lịch trình",
+            "lich trinh",
+            "itinerary",
+            "things to do",
+            "near me",
+            "gần đây",
+            "gan day",
+            "food",
+            "foods",
+            "eat",
+            "eating",
+            "eating out",
+            "dining",
+            "dine",
+            "breakfast",
+            "lunch",
+            "dinner",
+            "brunch",
+            "meal",
+            "traditional food",
+            "street food",
+            "ăn uống",
+            "an uong",
+            "ăn gì",
+            "an gi",
+            "ăn gì ngon",
+            "ăn ở đâu",
+            "thứ ăn",
+            "chu an",
+            "món ăn",
+            "mon an",
+            "vacation",
+        )
+    ):
+        if any(token in lowered for token in ("itinerary", "lịch trình", "lich trinh", "2 ngày", "3 ngày", "plan trip", "kế hoạch", "ke hoach")):
+            return "travel_planning"
+        return "local_discovery"
+    
     return "general_research"
 
 
@@ -331,6 +394,8 @@ class ToolPolicy:
             "weather_live": 30,
             "news_live": 120,
             "market_live": 45,
+            "local_discovery": 300,
+            "travel_planning": 300,
             "general_research": 600,
         }
 
@@ -345,9 +410,11 @@ class ToolPolicy:
         return self._mode == "demo"
 
     def allow_mock_fallback(self) -> bool:
-        if self._mode == "live":
-            return os.getenv("RESEARCH_ALLOW_MOCK_FALLBACK", "false").strip().lower() in ("1", "true", "yes", "on")
-        return True
+        if self._mode == "demo":
+            return True
+        # In live/hybrid modes, mock fallback must be explicitly enabled.
+        # This prevents returning fake example.local evidence in real user responses.
+        return os.getenv("RESEARCH_ALLOW_MOCK_FALLBACK", "false").strip().lower() in ("1", "true", "yes", "on")
 
     def provider_candidates(self, intent: SearchIntent) -> list[str]:
         if self._mode == "demo":
@@ -358,10 +425,18 @@ class ToolPolicy:
             return ["newsapi", "duckduckgo"]
         if intent == "market_live":
             return ["serpapi", "duckduckgo"]
+        if intent in ("local_discovery", "travel_planning"):
+            return ["serpapi", "osm_local", "duckduckgo", "newsapi"]
         return ["duckduckgo"]
 
     def speculative_enabled(self, intent: SearchIntent) -> bool:
-        return self._mode in ("live", "hybrid") and intent in ("weather_live", "news_live", "market_live")
+        return self._mode in ("live", "hybrid") and intent in (
+            "weather_live",
+            "news_live",
+            "market_live",
+            "local_discovery",
+            "travel_planning",
+        )
 
 
 class MockSearchProvider:
@@ -477,7 +552,61 @@ class DuckDuckGoSearchProvider:
             if len(documents) >= limit:
                 break
 
+        # Instant-answer API can be empty for local/place queries; fallback to HTML SERP parsing.
+        if not documents:
+            documents = self._search_html_sync(query, limit)
+
         return rank_documents_for_query(query, documents, limit=limit)
+
+    def _search_html_sync(self, query: str, limit: int) -> list[SearchDocument]:
+        response = httpx.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            timeout=self._timeout_seconds,
+            headers={"User-Agent": "GlassBoxResearch/1.0"},
+        )
+        response.raise_for_status()
+        return self._extract_html_results(query, response.text, limit)
+
+    def _extract_html_results(self, query: str, html: str, limit: int) -> list[SearchDocument]:
+        documents: list[SearchDocument] = []
+        anchors = re.findall(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        for href, raw_title in anchors:
+            title = re.sub(r"<[^>]+>", "", raw_title)
+            title = re.sub(r"\s+", " ", title).strip()
+            if not title:
+                continue
+
+            url = href.strip()
+            if "duckduckgo.com/l/?" in url:
+                parsed = urlparse(url)
+                qs = parse_qs(parsed.query)
+                uddg = qs.get("uddg", [""])[0]
+                if uddg:
+                    url = unquote(uddg)
+
+            if not url.startswith("http"):
+                continue
+
+            documents.append(
+                SearchDocument(
+                    title=title[:180],
+                    snippet=f"Search result for: {query}",
+                    url=url,
+                    freshness="live",
+                    reliability=0.5,
+                    provider=self.name,
+                )
+            )
+            if len(documents) >= limit:
+                break
+
+        return documents
 
     def _append_related_topic_documents(self, topic: object, documents: list[SearchDocument], limit: int) -> None:
         if len(documents) >= limit or not isinstance(topic, dict):
@@ -906,11 +1035,12 @@ class SerpAPIProvider:
         self._available = bool(self._api_key)
 
     async def search(self, query: str, limit: int = 5) -> SearchResultBatch:
+        intent = detect_search_intent(query)
         if not self._available:
             return SearchResultBatch(
                 provider=self.name,
                 documents=[],
-                intent="general_research",
+                intent=intent,
                 confidence=0.0,
                 providers_tried=[self.name],
             )
@@ -919,7 +1049,7 @@ class SerpAPIProvider:
         return SearchResultBatch(
             provider=self.name,
             documents=docs,
-            intent="general_research",
+            intent=intent,
             confidence=0.68 if docs else 0.0,
             providers_tried=[self.name],
         )
@@ -938,11 +1068,38 @@ class SerpAPIProvider:
             )
             response.raise_for_status()
             payload = response.json()
+            documents: list[SearchDocument] = []
+
+            # Local intent: prefer Google local pack style results when available.
+            local_results = payload.get("local_results") or payload.get("local_map") or {}
+            local_places = local_results.get("places") if isinstance(local_results, dict) else None
+            if isinstance(local_places, list):
+                for place in local_places[:limit]:
+                    title = str(place.get("title") or place.get("name") or "").strip()
+                    rating = str(place.get("rating") or "n/a").strip()
+                    reviews = str(place.get("reviews") or place.get("reviews_original") or "").strip()
+                    address = str(place.get("address") or place.get("snippet") or "").strip()
+                    website = str(place.get("website") or place.get("link") or "").strip()
+                    if not title:
+                        continue
+                    documents.append(
+                        SearchDocument(
+                            title=title[:100],
+                            snippet=f"Rating {rating} | Reviews {reviews} | {address}"[:300],
+                            url=(website or f"https://www.google.com/search?q={title.replace(' ', '+')}")[:500],
+                            freshness="live",
+                            published_at=None,
+                            reliability=0.74,
+                            provider=self.name,
+                        )
+                    )
+
             organic_results = payload.get("organic_results") or []
-            if not organic_results:
+            if not organic_results and documents:
+                return documents[:limit]
+            if not organic_results and not documents:
                 return []
 
-            documents: list[SearchDocument] = []
             for result in organic_results[:limit]:
                 title = str(result.get("title", "")).strip()
                 snippet = str(result.get("snippet", "")).strip()
@@ -966,6 +1123,120 @@ class SerpAPIProvider:
             return documents[:limit]
         except Exception:
             return []
+
+
+class OpenStreetMapLocalProvider:
+    """Local place provider using OpenStreetMap Nominatim (no API key)."""
+
+    name = "osm_local"
+
+    def __init__(self, timeout_seconds: float = 3.0) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    async def search(self, query: str, limit: int = 5) -> SearchResultBatch:
+        docs = await asyncio.to_thread(self._search_sync, query, limit)
+        return SearchResultBatch(
+            provider=self.name,
+            documents=docs,
+            intent="local_discovery",
+            confidence=0.68 if docs else 0.0,
+            providers_tried=[self.name],
+        )
+
+    @staticmethod
+    def _extract_place_type(query: str) -> str:
+        lowered = query.lower()
+        if any(token in lowered for token in ("restaurant", "nhà hàng", "nha hang", "quán ăn", "quan an", "risotto", "food", "foods", "eat", "eating", "eating out", "dining", "dine", "breakfast", "lunch", "dinner", "brunch", "meal", "traditional food", "street food", "ăn uống", "an uong", "ăn gì", "an gi", "ăn gì ngon", "ăn ở đâu", "thứ ăn", "chu an", "món ăn", "mon an")):
+            return "restaurant"
+        if any(token in lowered for token in ("hotel", "khách sạn", "khach san", "resort", "homestay")):
+            return "hotel"
+        if any(token in lowered for token in ("attraction", "địa điểm", "dia diem", "travel", "du lịch", "du lich")):
+            return "attraction"
+        return "place"
+
+    @staticmethod
+    def _extract_location(query: str) -> str | None:
+        lowered = query.lower()
+        for city in ("milan", "milano", "hanoi", "ha noi", "da nang", "ho chi minh", "saigon", "nha trang", "da lat"):
+            if city in lowered:
+                return city
+
+        match = re.search(r"\b(?:in|at|ở|tai|tại)\s+([A-Za-zÀ-ỹ][A-Za-zÀ-ỹ\s\-']{1,40})", query, flags=re.IGNORECASE)
+        if match:
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" ,.!?;:")
+            candidate = re.split(r"\b(with|for|and|or|which|that|good|best|review|reviews)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip(" ,.!?;:")
+            if candidate:
+                return candidate
+        return None
+
+    @classmethod
+    def _query_candidates(cls, query: str) -> list[str]:
+        place_type = cls._extract_place_type(query)
+        location = cls._extract_location(query)
+        candidates = [query.strip()]
+        if location:
+            candidates.extend(
+                [
+                    f"{place_type} in {location}",
+                    f"{place_type} {location}",
+                    location,
+                ]
+            )
+        return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+
+    def _search_sync(self, query: str, limit: int) -> list[SearchDocument]:
+        for candidate in self._query_candidates(query):
+            try:
+                response = httpx.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={
+                        "q": candidate,
+                        "format": "jsonv2",
+                        "limit": max(1, min(limit, 10)),
+                        "addressdetails": 1,
+                    },
+                    timeout=self._timeout_seconds,
+                    headers={"User-Agent": "GlassBoxLocalDiscovery/1.0"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                continue
+
+            if not isinstance(payload, list) or not payload:
+                continue
+
+            docs: list[SearchDocument] = []
+            for item in payload[: max(1, min(limit, 10))]:
+                if not isinstance(item, dict):
+                    continue
+                display_name = str(item.get("display_name", "")).strip()
+                name = str(item.get("name", "")).strip() or display_name.split(",", 1)[0].strip() or "Place"
+                osm_type = str(item.get("type", "place")).strip() or "place"
+                lat = str(item.get("lat", "")).strip()
+                lon = str(item.get("lon", "")).strip()
+                if not display_name:
+                    continue
+
+                osm_id = str(item.get("osm_id", "")).strip()
+                osm_entity_type = str(item.get("osm_type", "node")).strip() or "node"
+                details_url = f"https://www.openstreetmap.org/{osm_entity_type}/{osm_id}" if osm_id else "https://www.openstreetmap.org/"
+
+                docs.append(
+                    SearchDocument(
+                        title=name[:180],
+                        snippet=f"{osm_type}: {display_name}. Coordinates: {lat}, {lon}",
+                        url=details_url,
+                        freshness="live",
+                        reliability=0.72,
+                        provider=self.name,
+                    )
+                )
+
+            if docs:
+                return docs
+
+        return []
 
 
 class CommodityReferenceProvider:
@@ -1246,6 +1517,10 @@ class PolicyDrivenSearchProvider:
             return 0.58
         if provider_name == "weather_open_meteo":
             return 0.6
+        if provider_name == "serpapi":
+            return 0.65
+        if provider_name == "osm_local":
+            return 0.62
         if provider_name == "duckduckgo":
             return 0.45
         if provider_name == "mock":
