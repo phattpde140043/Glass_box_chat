@@ -31,10 +31,17 @@ WEATHER_HINTS = (
     "forecast",
     "dự báo",
     "du bao",
-    "ngày mai",
-    "ngay mai",
-    "tomorrow",
+    "rain",
+    "snow",
+    "temperature",
+    "humidity",
+    "mưa",
+    "tuyết",
+    "nhiệt độ",
 )
+
+# Time-only words — NOT standalone weather signals; only amplify when a core weather term is also present.
+_WEATHER_TIME_WORDS = ("tomorrow", "ngày mai", "ngay mai")
 
 MARKET_HINTS = (
     "gia vang",
@@ -126,6 +133,62 @@ LOOKUP_HINTS = (
     "what is",
     "là gì",
     "la gi",
+)
+
+LOCAL_DISCOVERY_HINTS = (
+    "nhà hàng",
+    "nha hang",
+    "restaurant",
+    "quán ăn",
+    "quan an",
+    "khách sạn",
+    "khach san",
+    "hotel",
+    "resort",
+    "homestay",
+    "địa điểm",
+    "dia diem",
+    "điểm đến",
+    "diem den",
+    "attraction",
+    "things to do",
+    "near me",
+    "food",
+    "foods",
+    "eat",
+    "eating",
+    "eating out",
+    "dining",
+    "dine",
+    "breakfast",
+    "lunch",
+    "dinner",
+    "brunch",
+    "meal",
+    "traditional food",
+    "street food",
+    "ăn uống",
+    "an uong",
+    "ăn gì",
+    "an gi",
+    "ăn gì ngon",
+    "ăn ở đâu",
+    "thứ ăn",
+    "chu an",
+    "món ăn",
+    "mon an",
+    "vacation",
+)
+
+TRAVEL_PLAN_HINTS = (
+    "du lịch",
+    "du lich",
+    "travel plan",
+    "itinerary",
+    "lịch trình",
+    "lich trinh",
+    "2 ngày",
+    "3 ngày",
 )
 
 SIMPLE_FACT_HINTS = (
@@ -227,6 +290,9 @@ def needs_research_text(text: str) -> bool:
 
 def is_weather_text(text: str) -> bool:
     lowered = text.lower()
+    # Require at least one genuine weather vocabulary term.
+    # Time words alone ("tomorrow", "ngày mai") must not trigger weather routing
+    # because they appear in unrelated queries ("find food in Milan tomorrow").
     return any(token in lowered for token in WEATHER_HINTS)
 
 
@@ -273,6 +339,16 @@ def is_market_data_text(text: str) -> bool:
 def is_lookup_text(text: str) -> bool:
     lowered = text.lower()
     return any(token in lowered for token in LOOKUP_HINTS)
+
+
+def is_local_discovery_text(text: str) -> bool:
+    lowered = text.lower()
+    return _contains_hint(lowered, LOCAL_DISCOVERY_HINTS)
+
+
+def is_travel_plan_text(text: str) -> bool:
+    lowered = text.lower()
+    return _contains_hint(lowered, TRAVEL_PLAN_HINTS)
 
 
 def is_simple_fact_text(text: str) -> bool:
@@ -374,6 +450,9 @@ class AutoDAGPlanner:
                 )
             ]
 
+        # Multi-hypothesis execution: fires when InputAnalyzer detected two close-confidence
+        # intent candidates (gap < 0.20). Cheap path (A) runs in parallel with expensive
+        # research path (B); FusionSkill arbitrates the outputs.
         if analysis.get("is_ambiguous"):
             return [
                 DAGNode(
@@ -422,6 +501,8 @@ class AutoDAGPlanner:
                 ),
             ]
 
+        # Deterministic weather branch: keep full prompt context (location + time + suitability)
+        # in one research step to avoid fragmented subtasks that can lose entity grounding.
         if is_weather_text(normalized_prompt) or analysis.get("decision_reason") == "implicit_weather_suitability":
             return [
                 DAGNode(
@@ -550,6 +631,148 @@ class AutoDAGPlanner:
                 ),
             ]
 
+        if analysis.get("intent") == "local_discovery" or is_local_discovery_text(analysis["normalized_prompt"]):
+            return [
+                DAGNode(
+                    id="geo-intent",
+                    skill="geo_intent",
+                    input={
+                        "id": "geo-intent",
+                        "description": normalized_prompt,
+                        "routed_skill": "geo_intent",
+                        "route_score": "intent_local_geo_parse",
+                        "cache_policy": "default",
+                    },
+                    depends_on=[],
+                    branch="main",
+                    priority=120,
+                ),
+                DAGNode(
+                    id="local-search",
+                    skill="local_discovery",
+                    input={
+                        "id": "local-search",
+                        "description": normalized_prompt,
+                        "routed_skill": "local_discovery",
+                        "route_score": "intent_local_discovery",
+                        "cache_policy": "bypass",
+                        "selected_tool": "local_search",
+                        "selected_tool_confidence": "0.92",
+                        "selected_tool_reason": "Local discovery intent should use place-aware search",
+                    },
+                    depends_on=["geo-intent"],
+                    branch="A",
+                    priority=118,
+                ),
+                DAGNode(
+                    id="place-verify",
+                    skill="place_verification",
+                    input={
+                        "id": "place-verify",
+                        "description": "Verify and deduplicate local results",
+                        "routed_skill": "place_verification",
+                        "route_score": "intent_local_verify",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["local-search"],
+                    branch="main",
+                    priority=110,
+                ),
+                DAGNode(
+                    id="review-consensus",
+                    skill="review_consensus",
+                    input={
+                        "id": "review-consensus",
+                        "description": "Extract pros/cons consensus from review evidence",
+                        "routed_skill": "review_consensus",
+                        "route_score": "intent_local_consensus",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["local-search"],
+                    branch="B",
+                    priority=104,
+                ),
+                DAGNode(
+                    id="synthesis",
+                    skill="synthesizer",
+                    input={"description": "Synthesize verified local place recommendations"},
+                    depends_on=["place-verify", "review-consensus"],
+                    branch="main",
+                    priority=-1,
+                ),
+            ]
+
+        if analysis.get("intent") == "travel_planning" or is_travel_plan_text(analysis["normalized_prompt"]):
+            return [
+                DAGNode(
+                    id="geo-intent",
+                    skill="geo_intent",
+                    input={
+                        "id": "geo-intent",
+                        "description": normalized_prompt,
+                        "routed_skill": "geo_intent",
+                        "route_score": "intent_travel_geo_parse",
+                        "cache_policy": "default",
+                    },
+                    depends_on=[],
+                    branch="main",
+                    priority=122,
+                ),
+                DAGNode(
+                    id="local-search",
+                    skill="local_discovery",
+                    input={
+                        "id": "local-search",
+                        "description": normalized_prompt,
+                        "routed_skill": "local_discovery",
+                        "route_score": "intent_travel_local_discovery",
+                        "cache_policy": "bypass",
+                        "selected_tool": "local_search",
+                        "selected_tool_confidence": "0.9",
+                        "selected_tool_reason": "Travel planning needs strong local evidence",
+                    },
+                    depends_on=["geo-intent"],
+                    branch="A",
+                    priority=118,
+                ),
+                DAGNode(
+                    id="place-verify",
+                    skill="place_verification",
+                    input={
+                        "id": "place-verify",
+                        "description": "Verify and score local travel options",
+                        "routed_skill": "place_verification",
+                        "route_score": "intent_travel_verify",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["local-search"],
+                    branch="main",
+                    priority=112,
+                ),
+                DAGNode(
+                    id="itinerary",
+                    skill="itinerary_planner",
+                    input={
+                        "id": "itinerary",
+                        "description": normalized_prompt,
+                        "routed_skill": "itinerary_planner",
+                        "route_score": "intent_travel_itinerary",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["place-verify"],
+                    branch="main",
+                    priority=106,
+                ),
+                DAGNode(
+                    id="synthesis",
+                    skill="synthesizer",
+                    input={"description": "Synthesize final travel itinerary recommendation"},
+                    depends_on=["itinerary"],
+                    branch="main",
+                    priority=-1,
+                ),
+            ]
+
         if analysis.get("intent") == "simple_fact" or is_simple_fact_text(analysis["normalized_prompt"]):
             return [
                 DAGNode(
@@ -605,7 +828,14 @@ class AutoDAGPlanner:
             routed = await self._router.route(task)
             routed_skill = routed.skill_name
 
+            # Guardrail: regular task nodes should never execute synthesizer directly.
             if routed_skill == "synthesizer":
+                description = str(task.get("description", ""))
+                routed_skill = "research" if needs_research_text(description) else "general_answer"
+
+            # Guardrail: internal pipeline skills require dependency outputs and should not be
+            # directly selected for user-facing tasks.
+            if routed_skill in {"place_verification", "review_consensus", "itinerary_planner", "geo_intent", "fusion"}:
                 description = str(task.get("description", ""))
                 routed_skill = "research" if needs_research_text(description) else "general_answer"
 
@@ -695,9 +925,11 @@ class AutoDAGPlanner:
         if intent in {"knowledge_lookup", "information_retrieval", "research"} and has_analysis_hint:
             return True
 
+        # Noisy/unknown intent from LLM: infer by prompt semantics.
         if has_analysis_hint and has_commodity_hint and has_time_hint:
             return True
 
+        # For multi-branch research, enable reasoning layer even without explicit keyword.
         research_count = sum(1 for node in nodes if node.skill == "research")
         if intent in {"knowledge_lookup", "research"} and research_count >= 2 and analysis.get("execution_mode") == "parallel":
             return True
@@ -706,6 +938,7 @@ class AutoDAGPlanner:
 
     @staticmethod
     def _collapse_weather_research_nodes(nodes: list[DAGNode], normalized_prompt: str) -> list[DAGNode]:
+        """For pure weather prompts, keep a single research node to avoid duplicate tool calls."""
         if not is_weather_text(normalized_prompt):
             return nodes
 
@@ -715,6 +948,7 @@ class AutoDAGPlanner:
         if any(node.skill != "research" for node in non_synth_nodes):
             return nodes
 
+        # Keep the highest-priority research node only.
         best = max(non_synth_nodes, key=lambda node: (node.priority, -len(node.depends_on), node.id))
         return [best]
 

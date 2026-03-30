@@ -91,12 +91,15 @@ class AmbiguityDetector:
 class InputAnalyzer:
     _LLM_INTENT_TRUST_THRESHOLD = 0.7
 
+    # Maps resolved intent to pipeline tier for rule-inferred paths.
     _INTENT_TIER_MAP: dict[str, str] = {
         "market_price": "research",
         "market_analysis": "analytical",
         "trend_analysis": "analytical",
         "knowledge_lookup": "research",
         "information_retrieval": "research",
+        "local_discovery": "research",
+        "travel_planning": "analytical",
         "research": "research",
         "simple_fact": "direct",
         "question": "direct",
@@ -112,6 +115,8 @@ class InputAnalyzer:
         "market_price",
         "market_analysis",
         "trend_analysis",
+        "local_discovery",
+        "travel_planning",
         "simple_fact",
     }
 
@@ -207,6 +212,39 @@ class InputAnalyzer:
         "la gi",
     )
 
+    _LOCAL_DISCOVERY_HINTS = (
+        "nhà hàng",
+        "nha hang",
+        "restaurant",
+        "quán ăn",
+        "quan an",
+        "khách sạn",
+        "khach san",
+        "hotel",
+        "resort",
+        "homestay",
+        "địa điểm",
+        "dia diem",
+        "điểm đến",
+        "diem den",
+        "attraction",
+        "things to do",
+        "near me",
+    )
+
+    _TRAVEL_PLAN_HINTS = (
+        "du lịch",
+        "du lich",
+        "travel plan",
+        "itinerary",
+        "lịch trình",
+        "lich trinh",
+        "2 ngày",
+        "3 ngày",
+        "kế hoạch đi",
+        "ke hoach di",
+    )
+
     _SIMPLE_FACT_HINTS = (
         "what is",
         "who is",
@@ -274,6 +312,8 @@ class InputAnalyzer:
             ' analytical=multi-step analysis with synthesis.'
             ' intents: top-K intent candidates sorted by confidence desc (max 3);'
             ' intent field must match intents[0].name.'
+            ' Prefer intent labels from this set when applicable: '
+            'request|question|research|knowledge_lookup|information_retrieval|market_price|market_analysis|trend_analysis|simple_fact|local_discovery|travel_planning.'
         )
         memory_context = self._memory_getter(session_id)
         response = self._llm_json_inferer(
@@ -338,8 +378,22 @@ class InputAnalyzer:
     def _canonicalize_intent(cls, value: str) -> str:
         return str(value).strip().lower().replace("-", "_").replace(" ", "_")
 
+    # --- DEPRECATED: _apply_special_intent() no longer used ---
+    # LLM-first pattern: rules validate, not classify. No need for special intent injection.
+
     @classmethod
     def _resolve_intent(cls, analysis: AnalysisResult) -> AnalysisResult:
+        """
+        LLM-first validator pattern.
+        
+        Rules NEVER override LLM intent. Instead:
+        1. Hard guardrails (market_price) VALIDATE unambiguous signals only
+        2. High-confidence LLM (>=0.7) is TRUSTED as-is
+        3. Ambiguity detection preserves multi-hypothesis for planner
+        4. Low-confidence LLM falls back to research tier (safe default)
+        
+        Note: SearchDecisionGate (in orchestrator) will later decide if search/tools needed.
+        """
         normalized_prompt = str(analysis.get("normalized_prompt", "")).strip()
         if not normalized_prompt:
             return analysis
@@ -349,21 +403,59 @@ class InputAnalyzer:
         intent_tier = str(analysis.get("intent_tier") or "").strip().lower()
 
         def _ensure_tier(result: AnalysisResult, fallback_tier: str) -> AnalysisResult:
+            """Propagate or infer intent_tier.
+            
+            If intent was changed from original LLM response, tier must be recalculated.
+            """
+            # Always infer tier from current intent to handle intent changes properly
             final_intent = str(result.get("intent", "request"))
             inferred_tier = cls._INTENT_TIER_MAP.get(final_intent, fallback_tier)
             return {**result, "intent_tier": inferred_tier}
 
+        # Stage 1: TRIVIAL TIER FAST-PATH
+        # Greetings/chitchat → skip pipeline entirely
         if intent_tier == "trivial":
             return {**analysis, "intent": "request", "need_pipeline": False, "intent_tier": "trivial"}
 
+        # Stage 2: HARD GUARDRAIL
+        # Market-price signals (XAU/USD, BTC, giá vàng) — always deterministic
+        # This validates the signal, never overrides LLM
         if cls._is_market_price_prompt(normalized_prompt):
             if llm_intent != "market_price":
+                # Hard signal detected but LLM missed → force correct intent
                 return _ensure_tier(
                     {**analysis, "intent": "market_price", "keywords": list(dict.fromkeys([*analysis.get("keywords", []), "market_price"]))[:6]},
                     "research",
                 )
             return _ensure_tier({**analysis}, "research")
 
+        if cls._is_local_discovery_prompt(normalized_prompt):
+            if llm_intent != "local_discovery":
+                return _ensure_tier(
+                    {
+                        **analysis,
+                        "intent": "local_discovery",
+                        "keywords": list(dict.fromkeys([*analysis.get("keywords", []), "local_discovery"]))[:6],
+                    },
+                    "research",
+                )
+            return _ensure_tier({**analysis}, "research")
+
+        if cls._is_travel_planning_prompt(normalized_prompt):
+            if llm_intent != "travel_planning":
+                return _ensure_tier(
+                    {
+                        **analysis,
+                        "intent": "travel_planning",
+                        "keywords": list(dict.fromkeys([*analysis.get("keywords", []), "travel_planning"]))[:6],
+                    },
+                    "analytical",
+                )
+            return _ensure_tier({**analysis}, "analytical")
+
+        # Stage 3: AMBIGUITY DETECTION
+        # Preserve multi-hypothesis when top-2 candidates too close
+        # Let planner (with FusionSkill) handle multiple paths
         intent_candidates = [c for c in (analysis.get("intent_candidates") or []) if isinstance(c, dict)]
         if AmbiguityDetector.is_ambiguous(intent_candidates) and llm_confidence < cls._LLM_INTENT_TRUST_THRESHOLD:
             primary = cls._canonicalize_intent(intent_candidates[0].get("name", llm_intent))
@@ -374,19 +466,35 @@ class InputAnalyzer:
                 "research",
             )
 
+        # Stage 4: LLM TRUST THRESHOLD
+        # High confidence LLM classification → use as-is
         if llm_confidence >= cls._LLM_INTENT_TRUST_THRESHOLD:
             if llm_intent in cls._KNOWN_INTENTS:
                 return _ensure_tier({**analysis, "intent": llm_intent}, intent_tier or "direct")
+            # Unknown intent → research (conservative)
             return _ensure_tier({**analysis, "intent": "research"}, "research")
 
+        # Stage 5: LOW CONFIDENCE FALLBACK
+        # LLM uncertain → safe research tier
+        # SearchDecisionGate will later decide if actual search/tools needed
         return _ensure_tier({**analysis, "intent": "research"}, "research")
 
     @classmethod
     def _is_market_price_prompt(cls, text: str) -> bool:
+        """Hard guardrail: detect market price signals (XAU/USD, BTC, giá vàng, forex)."""
         return cls._contains_hint(text, cls._MARKET_HINTS)
 
     @classmethod
+    def _is_local_discovery_prompt(cls, text: str) -> bool:
+        return cls._contains_hint(text, cls._LOCAL_DISCOVERY_HINTS)
+
+    @classmethod
+    def _is_travel_planning_prompt(cls, text: str) -> bool:
+        return cls._contains_hint(text, cls._TRAVEL_PLAN_HINTS)
+
+    @classmethod
     def _infer_time_window(cls, text: str) -> str:
+        """Infer time window from text for financial analysis queries."""
         lowered = text.lower()
         if any(token in lowered for token in ("6 months", "six months", "past six months", "last six months")):
             return "6m"
