@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 from .chat_contract import (
@@ -55,6 +57,8 @@ class TraceEvent(BaseModel):
     sessionId: str
     sessionLabel: str
     messageId: str
+    metadata: dict[str, Any] | None = None
+    artifact: dict[str, Any] | None = None
 
     @field_validator("event")
     @classmethod

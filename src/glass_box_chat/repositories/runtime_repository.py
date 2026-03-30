@@ -26,6 +26,15 @@ from ..sqlite_db import (
 )
 from .contracts import HealthRepository, HitlRepository, RunRepository, SessionQueryRepository
 
+__all__ = [
+    "RuntimeRepository",
+    "TASK_STATE_COMPLETED",
+    "TASK_STATE_FAILED",
+    "TASK_STATE_QUEUED",
+    "TASK_STATE_RUNNING",
+    "TASK_STATE_WAITING",
+]
+
 
 class RuntimeRepository(HealthRepository, SessionQueryRepository, RunRepository, HitlRepository):
     def get_database_path(self):

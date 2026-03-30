@@ -255,6 +255,7 @@ class ExecutionGate:
         title_case_location = re.search(r"\b(?:in|at|tại|ở)\s+[A-ZÀ-Ỹ][\wÀ-ỹ-]*(?:\s+[A-ZÀ-Ỹ][\wÀ-ỹ-]*)*", prompt)
         if title_case_location is not None:
             return True
+        # Fallback for common itinerary-style statements ending with a capitalized place name.
         trailing_location = re.search(r"[A-ZÀ-Ỹ][\wÀ-ỹ-]*(?:\s+[A-ZÀ-Ỹ][\wÀ-ỹ-]*)*$", prompt.strip())
         if trailing_location is not None and len(trailing_location.group(0).split()) <= 4:
             return True

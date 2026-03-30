@@ -10,7 +10,6 @@ from ..distribution.task_distributor import TaskDistributor
 from ..models.chat_models import ResumeRequest, RunRequest
 from ..repositories.runtime_repository import RuntimeRepository
 from ..services.agent_run_service import AgentRunService
-from ..services.mock_trace_engine import MockTraceEngine
 from ..services.orchestrator_skill_agent import OrchestratorSkillAgent
 from ..services.health_service import HealthService
 from ..services.hitl_service import HitlService
@@ -20,22 +19,9 @@ from ..services.trace_engine_protocol import TraceEngineProtocol
 
 router = APIRouter()
 
-
-def _build_trace_engine() -> TraceEngineProtocol:
-    mode = os.getenv("TRACE_ENGINE_MODE", "orchestrator").strip().lower()
-    if mode == "mock":
-        return MockTraceEngine()
-
-    try:
-        return OrchestratorSkillAgent()
-    except Exception:
-        # Keep API bootable when provider credentials are not configured.
-        return MockTraceEngine()
-
-
 # Composition root: wire the dependency graph once at module import time.
 _repository = RuntimeRepository()
-_trace_engine: TraceEngineProtocol = _build_trace_engine()
+_trace_engine: TraceEngineProtocol = OrchestratorSkillAgent()
 _health = HealthService(_repository)
 _session_query = SessionQueryService(_repository)
 _agent_run = AgentRunService(_repository, _trace_engine)

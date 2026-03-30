@@ -145,7 +145,10 @@ def build_tool_call_detail(trace_entry: dict[str, str]) -> str:
 
 def build_tool_result_detail(trace_entry: dict[str, str]) -> str:
     outcome = "succeeded" if trace_entry["success"] == "true" else "failed"
-    return f"Step {trace_entry['node_id']} {outcome}. Primary result: {trace_entry['output']}"
+    return (
+        f"Step {trace_entry['node_id']} {outcome}. "
+        f"Primary result: {trace_entry['output']}"
+    )
 
 
 def build_tool_phase_details(trace_entry: dict[str, str]) -> list[str]:
@@ -157,20 +160,32 @@ def build_tool_phase_details(trace_entry: dict[str, str]) -> list[str]:
     is_success = trace_entry.get("success") == "true"
 
     if skill_name == "research":
-        phases = [f"Sending a research query for '{topic}' to the relevant sources."]
+        phases = [
+            f"Sending a research query for '{topic}' to the relevant sources.",
+        ]
         if is_success:
-            phases.append(f"Received initial data from {source_count} sources. Extracting main points and supporting evidence.")
-            phases.append(f"Comparing {citation_count} citations and evaluating confidence before moving to synthesis.")
+            phases.append(
+                f"Received initial data from {source_count} sources. Extracting main points and supporting evidence."
+            )
+            phases.append(
+                f"Comparing {citation_count} citations and evaluating confidence before moving to synthesis."
+            )
         else:
-            phases.append("No sufficient evidence was found. This step is being marked as lacking data or relevance.")
+            phases.append(
+                "No sufficient evidence was found. This step is being marked as lacking data or relevance."
+            )
         return phases
 
     if skill_name == "finance":
-        phases = [f"Querying the market data source chain for '{topic}'."]
+        phases = [
+            f"Querying the market data source chain for '{topic}'.",
+        ]
         if providers != "none":
             phases.append(f"Providers being compared sequentially or in parallel: {providers}.")
         if is_success:
-            phases.append(f"Received data from {source_count} sources. Normalizing price, timestamp, and confidence.")
+            phases.append(
+                f"Received data from {source_count} sources. Normalizing price, timestamp, and confidence."
+            )
         else:
             phases.append("Live pricing sources did not return enough data. Marking the result as degraded and retaining reference sources.")
         return phases
@@ -179,8 +194,8 @@ def build_tool_phase_details(trace_entry: dict[str, str]) -> list[str]:
         phases = [
             f"Collecting research signals for '{topic}' and normalizing them into quantitative data points.",
             (
-                f"Evaluating data coverage ({trace_entry.get('data_coverage', '0')}), evidence quality "
-                f"({trace_entry.get('evidence_quality', 'n/a')}) and conflicts ({trace_entry.get('conflict_count', '0')})."
+                f"Evaluating data coverage ({trace_entry.get('data_coverage', '0')}), "
+                f"evidence quality ({trace_entry.get('evidence_quality', 'n/a')}) and conflicts ({trace_entry.get('conflict_count', '0')})."
             ),
         ]
         if is_success:
