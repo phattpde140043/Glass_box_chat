@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 
 from ..search_providers import DuckDuckGoSearchProvider
 from .tool_gateway import BaseTool, ToolInput, ToolOutput

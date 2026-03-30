@@ -263,6 +263,10 @@ class FinanceTool(BaseTool):
                 quote = await provider_call()
                 if quote is not None:
                     quotes.append(quote)
+                    # Keep latency bounded: stop the chain after the first valid quote.
+                    # execute_with_retry applies a single-attempt timeout budget, so
+                    # continuing to slower providers can cancel an otherwise successful run.
+                    break
                 else:
                     errors.append(f"{provider_name}: no_data")
             except Exception as err:
@@ -315,10 +319,19 @@ class FinanceTool(BaseTool):
                 csv_text = response.text.strip()
 
             lines = [line for line in csv_text.splitlines() if line.strip()]
-            if len(lines) < 2:
+            if not lines:
                 return None
-            fields = [field.strip() for field in lines[1].split(",")]
+
+            # Stooq may return either:
+            # 1) header + data row, or
+            # 2) a single data row without header.
+            candidate_row = lines[-1]
+            fields = [field.strip() for field in candidate_row.split(",")]
             if len(fields) < 7:
+                return None
+
+            # If we accidentally parsed a header row, abort.
+            if fields[0].lower() == "symbol":
                 return None
 
             symbol = fields[0] or "XAUUSD"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 
 from ..search_providers import NewsAPIProvider

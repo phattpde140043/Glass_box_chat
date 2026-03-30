@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import os
 import re
-from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from html.parser import HTMLParser

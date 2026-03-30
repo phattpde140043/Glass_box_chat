@@ -1,14 +1,46 @@
-from typing import Any
-
-
 class ToolResolver:
+    """Resolves a tool name or tool-like object to a concrete tool instance.
+
+    New tools can be registered at composition-root time via ``register()``,
+    without modifying this class (OCP).
+    """
+
     def __init__(self) -> None:
         self._tool_instances: dict[str, object] = {}
+        self._factories: dict[str, type] = {}
+        self._register_defaults()
+
+    def _register_defaults(self) -> None:
+        try:
+            from .calculator_tool import CalculatorTool
+            from .fetch_page_tool import FetchPageTool
+            from .finance_tool import FinanceTool
+            from .local_search_tool import LocalSearchTool
+            from .news_api_tool import NewsAPITool
+            from .weather_tool import WeatherTool
+            from .web_search_tool import WebSearchTool
+        except Exception:
+            return
+
+        self._factories = {
+            "web_search": WebSearchTool,
+            "weather": WeatherTool,
+            "news_api": NewsAPITool,
+            "fetch_page": FetchPageTool,
+            "calculator": CalculatorTool,
+            "finance": FinanceTool,
+            "local_search": LocalSearchTool,
+        }
+
+    def register(self, name: str, factory: type) -> None:
+        """Register a custom tool factory so it can be resolved by name."""
+        self._factories[name.strip().lower()] = factory
 
     def resolve(self, selected_tool: object | None) -> object | None:
         if selected_tool is None:
             return None
 
+        # Already a tool-like object — pass through directly.
         if hasattr(selected_tool, "execute") and hasattr(selected_tool, "name"):
             return selected_tool
 
@@ -23,25 +55,7 @@ class ToolResolver:
         if cached is not None:
             return cached
 
-        try:
-            from .calculator_tool import CalculatorTool
-            from .fetch_page_tool import FetchPageTool
-            from .finance_tool import FinanceTool
-            from .news_api_tool import NewsAPITool
-            from .weather_tool import WeatherTool
-            from .web_search_tool import WebSearchTool
-        except Exception:
-            return None
-
-        factories = {
-            "web_search": WebSearchTool,
-            "weather": WeatherTool,
-            "news_api": NewsAPITool,
-            "fetch_page": FetchPageTool,
-            "calculator": CalculatorTool,
-            "finance": FinanceTool,
-        }
-        factory = factories.get(tool_name)
+        factory = self._factories.get(tool_name)
         if factory is None:
             return None
 
