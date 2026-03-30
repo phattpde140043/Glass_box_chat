@@ -4,10 +4,12 @@ import os
 from collections.abc import Callable
 
 from .search_providers import (
+    CommodityReferenceProvider,
     DuckDuckGoSearchProvider,
     FallbackSearchProvider,
     MockSearchProvider,
     NewsAPIProvider,
+    OpenStreetMapLocalProvider,
     OpenMeteoWeatherProvider,
     PolicyDrivenSearchProvider,
     SerpAPIProvider,
@@ -27,6 +29,8 @@ def build_default_search_provider() -> SearchProvider:
     serpapi_key = os.getenv("SERPAPI_API_KEY", "").strip()
     news_provider = NewsAPIProvider(api_key=newsapi_key, timeout_seconds=timeout_seconds)
     serp_provider = SerpAPIProvider(api_key=serpapi_key, timeout_seconds=timeout_seconds)
+    commodity_provider = CommodityReferenceProvider(timeout_seconds=timeout_seconds)
+    osm_local_provider = OpenStreetMapLocalProvider(timeout_seconds=timeout_seconds)
     mock_provider = MockSearchProvider()
 
     if mode == "legacy":
@@ -38,6 +42,8 @@ def build_default_search_provider() -> SearchProvider:
         duck_provider.name: duck_provider,
         news_provider.name: news_provider,
         serp_provider.name: serp_provider,
+        commodity_provider.name: commodity_provider,
+        osm_local_provider.name: osm_local_provider,
     }
     return PolicyDrivenSearchProvider(
         providers=providers_dict,

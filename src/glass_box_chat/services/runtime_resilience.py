@@ -128,7 +128,9 @@ class CircuitBreaker:
 
 
 class ShortTermMemoryStore:
-    def __init__(self, max_entries: int = 12) -> None:
+    _CHAT_KINDS = {"chat_user", "chat_assistant", "user_prompt", "final_answer"}
+
+    def __init__(self, max_entries: int = 48) -> None:
         self._max_entries = max_entries
         self._sessions: dict[str, deque[MemoryEntry]] = {}
 
@@ -137,13 +139,30 @@ class ShortTermMemoryStore:
         if not cleaned:
             return
         session_memory = self._sessions.setdefault(session_id, deque(maxlen=self._max_entries))
-        session_memory.append(MemoryEntry(kind=kind, content=cleaned[:600]))
+        session_memory.append(MemoryEntry(kind=kind, content=cleaned[:500]))
 
-    def snapshot(self, session_id: str, limit: int = 6) -> str:
-        entries = list(self._sessions.get(session_id, deque()))[-limit:]
+    def snapshot(self, session_id: str, limit: int = 10) -> str:
+        entries = list(self._sessions.get(session_id, deque()))
         if not entries:
             return ""
-        return "\n".join(f"- {entry.kind}: {entry.content}" for entry in entries)
+
+        chat_entries = [entry for entry in entries if entry.kind in self._CHAT_KINDS]
+        exec_entries = [entry for entry in entries if entry.kind not in self._CHAT_KINDS]
+
+        selected_chat = chat_entries[-min(6, limit) :]
+        remaining = max(0, limit - len(selected_chat))
+        selected_exec = exec_entries[-remaining:] if remaining > 0 else []
+
+        lines: list[str] = []
+        if selected_chat:
+            lines.append("Conversation context:")
+            lines.extend(f"- {entry.kind}: {entry.content}" for entry in selected_chat)
+
+        if selected_exec:
+            lines.append("Execution context:")
+            lines.extend(f"- {entry.kind}: {entry.content}" for entry in selected_exec)
+
+        return "\n".join(lines)
 
     def clear(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)

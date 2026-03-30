@@ -114,10 +114,27 @@ class SemanticRouter:
             "ngay mai",
             "tomorrow",
         )
+        local_lookup_hints = (
+            "restaurant",
+            "nhà hàng",
+            "nha hang",
+            "hotel",
+            "khách sạn",
+            "khach san",
+            "travel",
+            "du lịch",
+            "du lich",
+            "itinerary",
+            "lịch trình",
+            "lich trinh",
+            "địa điểm",
+            "dia diem",
+        )
         requires_lookup = (
             needs_research_text(task_text)
             or any(token in lowered for token in lookup_hints)
             or any(token in lowered for token in weather_lookup_hints)
+            or any(token in lowered for token in local_lookup_hints)
         )
 
         if requires_lookup and not explicit_synthesis:
