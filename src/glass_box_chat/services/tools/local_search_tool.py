@@ -30,7 +30,7 @@ class LocalSearchTool(BaseTool):
             return f"{query} booking reviews location"
         if any(token in lowered for token in ("du lịch", "du lich", "travel", "địa điểm", "dia diem", "attraction")):
             return f"{query} things to do guide"
-        if any(token in lowered for token in ("food", "foods", "eat", "eating", "dining", "traditional", "ăn uống", "an uong", "món ăn", "mon an")):
+        if any(token in lowered for token in ("food", "foods", "eat", "eating", "eating out", "dining", "dine", "breakfast", "lunch", "dinner", "brunch", "meal", "traditional", "street food", "ăn uống", "an uong", "ăn gì", "an gi", "ăn gì ngon", "ăn ở đâu", "thứ ăn", "chu an", "món ăn", "mon an")):
             return f"{query} restaurant best places reviews"
         return query
 
