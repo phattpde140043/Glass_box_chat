@@ -6,14 +6,22 @@
   "messageRoles": ["user", "assistant"],
   "traceEventTypes": [
     "agent_start",
+    "node_start",
+    "subagent_start",
     "thinking",
     "tool_call",
     "tool_result",
+    "node_done",
+    "subagent_done",
+    "artifact_created",
+    "artifact_updated",
     "waiting",
     "done"
   ],
   "traceBranches": ["main", "A", "B", "C"],
   "traceModes": ["parallel", "sequential"],
   "agentStatuses": ["running", "waiting_user", "done"],
-  "assistantPayloadType": "assistant_message"
+  "assistantPayloadType": "assistant_message",
+  "artifactTypes": ["plan", "evidence", "final_response", "report", "dataset", "other"],
+  "artifactStatuses": ["created", "updated", "final"]
 }
