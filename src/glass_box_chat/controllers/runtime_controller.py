@@ -13,15 +13,37 @@ from ..services.agent_run_service import AgentRunService
 from ..services.orchestrator_skill_agent import OrchestratorSkillAgent
 from ..services.health_service import HealthService
 from ..services.hitl_service import HitlService
+from ..services.mock_trace_engine import MockTraceEngine
 from ..services.session_query_service import SessionQueryService
 from ..services.test_stream_service import TestStreamService
 from ..services.trace_engine_protocol import TraceEngineProtocol
 
 router = APIRouter()
 
+
+def _build_trace_engine() -> TraceEngineProtocol:
+    provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+    if provider == "claude":
+        if anthropic_api_key:
+            return OrchestratorSkillAgent(model="claude-3-5-sonnet")
+    elif provider == "gemini":
+        if gemini_api_key:
+            return OrchestratorSkillAgent()
+    else:
+        if gemini_api_key:
+            return OrchestratorSkillAgent()
+        if anthropic_api_key:
+            return OrchestratorSkillAgent(model="claude-3-5-sonnet")
+
+    print("[runtime] No LLM API key configured. Falling back to MockTraceEngine.")
+    return MockTraceEngine()
+
 # Composition root: wire the dependency graph once at module import time.
 _repository = RuntimeRepository()
-_trace_engine: TraceEngineProtocol = OrchestratorSkillAgent()
+_trace_engine: TraceEngineProtocol = _build_trace_engine()
 _health = HealthService(_repository)
 _session_query = SessionQueryService(_repository)
 _agent_run = AgentRunService(_repository, _trace_engine)

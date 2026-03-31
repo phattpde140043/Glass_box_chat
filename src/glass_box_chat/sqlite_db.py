@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DATABASE_DIR = REPO_ROOT / "data"
 DATABASE_PATH = DATABASE_DIR / "glassbox.db"
 
