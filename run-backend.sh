@@ -56,8 +56,15 @@ export WEATHER_ENABLE_BERT_EXTRACTOR="${WEATHER_ENABLE_BERT_EXTRACTOR:-false}"
 export WEATHER_BERT_MODEL="${WEATHER_BERT_MODEL:-dslim/bert-base-NER}"
 export WEATHER_BERT_MIN_SCORE="${WEATHER_BERT_MIN_SCORE:-0.5}"
 
-if ! "$VENV_PYTHON" -m pip install -r "$API_DIR/requirements.txt"; then
-  exit $?
+if [[ -f "$API_DIR/requirements.lock" ]]; then
+  echo "[run-backend] Installing from lock file (reproducible build)..."
+  if ! "$VENV_PYTHON" -m pip install -r "$API_DIR/requirements.lock"; then
+    exit $?
+  fi
+else
+  if ! "$VENV_PYTHON" -m pip install -r "$API_DIR/requirements.txt"; then
+    exit $?
+  fi
 fi
 
 if [[ "$WEATHER_ENABLE_BERT_EXTRACTOR" == "1" || "$WEATHER_ENABLE_BERT_EXTRACTOR" == "true" || "$WEATHER_ENABLE_BERT_EXTRACTOR" == "yes" || "$WEATHER_ENABLE_BERT_EXTRACTOR" == "on" ]]; then
