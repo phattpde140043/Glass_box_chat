@@ -38,7 +38,7 @@ class GeminiTraceEngine(TraceEngineProtocol):
             TraceEvent(
                 **build_trace_payload(
                     event="thinking",
-                    detail=f"Sending the prompt to the Gemini API (model: {self.model}) for analysis: {prompt[:80]}...",
+                    detail=f"Sending a request to the Gemini API for analysis using model {self.model}.",
                     agent="GeminiLLM",
                     session_id=session_id,
                     session_label=session_label,
@@ -52,7 +52,7 @@ class GeminiTraceEngine(TraceEngineProtocol):
             TraceEvent(
                 **build_trace_payload(
                     event="tool_call",
-                    detail=f"Calling {self.model}:generateContent with prompt: {prompt}",
+                    detail=f"Calling {self.model}:generateContent with the prepared request payload.",
                     agent="GeminiLLM",
                     session_id=session_id,
                     session_label=session_label,
@@ -78,7 +78,7 @@ class GeminiTraceEngine(TraceEngineProtocol):
             TraceEvent(
                 **build_trace_payload(
                     event="tool_result",
-                    detail=f"Gemini returned: {response_text[:200]}",
+                    detail="Gemini returned a response payload. The content was stored for downstream consumption.",
                     agent="GeminiLLM",
                     session_id=session_id,
                     session_label=session_label,

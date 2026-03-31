@@ -125,6 +125,14 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
         self._router = router or SemanticRouter(self._registry, self._embedding_service)
         self._planner = planner or AutoDAGPlanner(self._router, self._call_model)
         self._tool_resolver = ToolResolver()
+        # Inject the shared search provider into WeatherTool so it reuses the
+        # same circuit-breaker, speculative execution, and policy chain instead
+        # of owning a standalone OpenMeteo instance.
+        from .tools.weather_tool import WeatherTool as _WeatherTool
+        from .search_providers import PolicyDrivenSearchProvider as _PolicyProvider
+        if isinstance(self._search_provider, _PolicyProvider):
+            _sp = self._search_provider
+            self._tool_resolver.register("weather", lambda: _WeatherTool(search_provider=_sp))
         self._executor = executor or DAGExecutor(self._registry, tool_resolver=self._tool_resolver)
         self._analyzer = analyzer or InputAnalyzer(
             self._call_model,
@@ -309,6 +317,9 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
             dag,
             analysis["normalized_prompt"],
             recent_memory_getter=lambda: self._memory.snapshot(session_id),
+            response_language=str(analysis.get("response_language", "english")),
+            detected_input_language=str(analysis.get("detected_input_language", "english")),
+            explicit_response_language=bool(analysis.get("explicit_response_language", False)),
         ):
             result = update.result
             results[update.node.id] = (
@@ -431,16 +442,24 @@ class OrchestratorSkillAgent(TraceEngineProtocol):
 
         final_answer, final_payload = self._final_response_builder.build_payload_from_results(results, analysis)
 
-        dual_niche_summary = (
-            ((final_payload.get("reasoningQuality") or {}).get("dualNiche") or {}).get("summary")
+        dual_niche_payload = (
+            ((final_payload.get("reasoningQuality") or {}).get("dualNiche") or {})
             if isinstance(final_payload, dict)
-            else None
+            else {}
         )
-        if isinstance(dual_niche_summary, str) and dual_niche_summary.strip():
+        if isinstance(dual_niche_payload, dict) and dual_niche_payload:
+            quant_sources = int((((dual_niche_payload.get("quantitative") or {}).get("sourceCount", 0)) or 0))
+            qual_sources = int((((dual_niche_payload.get("qualitative") or {}).get("sourceCount", 0)) or 0))
+            niche_balance = float(dual_niche_payload.get("niche_balance", 1.0) or 1.0)
             yield TraceEvent(
                 **build_trace_payload(
                     event="thinking",
-                    detail=dual_niche_summary,
+                    detail=(
+                        "Dual-niche evidence review completed.\n"
+                        f"Quantitative sources: {quant_sources}.\n"
+                        f"Qualitative sources: {qual_sources}.\n"
+                        f"Niche balance: {niche_balance:.2f}."
+                    ),
                     agent="OrchestratorAgent",
                     mode=analysis["execution_mode"],
                     session_id=session_id,

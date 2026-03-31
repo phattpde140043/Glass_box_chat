@@ -11,6 +11,9 @@ class SkillContext:
     dependency_outputs: dict[str, Any]
     recent_memory: str = ""
     selected_tool: object | None = None  # Optional tool hint (Tool protocol instance)
+    response_language: str = "english"
+    detected_input_language: str = "english"
+    explicit_response_language: bool = False
 
 
 @dataclass

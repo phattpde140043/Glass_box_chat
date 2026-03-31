@@ -6,6 +6,7 @@ from .search_providers import SearchProvider
 from .skill_core import SkillRegistry
 from .skills import (
     AnalysisSkill,
+    CandidateExtractionSkill,
     CodeExampleSkill,
     CompareSkill,
     FinanceSkill,
@@ -32,6 +33,7 @@ def build_default_skill_registry(model_generate: Callable[[str], str], search_pr
     registry.register(LocalDiscoverySkill(model_generate, search_provider))
     registry.register(PlaceVerificationSkill())
     registry.register(ReviewConsensusSkill())
+    registry.register(CandidateExtractionSkill(model_generate))
     registry.register(ItineraryPlannerSkill(model_generate))
     registry.register(FinanceSkill())
     registry.register(AnalysisSkill(model_generate))

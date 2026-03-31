@@ -7,7 +7,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
-from .planner import AnalysisResult, is_lookup_text, is_market_analysis_text, is_market_data_text, is_weather_text
+from .planner import AnalysisResult, is_local_discovery_text, is_lookup_text, is_market_analysis_text, is_market_data_text, is_weather_text
 
 
 class ExecutionDecisionModel(BaseModel):
@@ -176,6 +176,15 @@ class ExecutionGate:
                 need_tools=True,
                 confidence=0.84,
                 reason="analysis_detected",
+            )
+
+        if intent in {"local_discovery", "travel_planning"} or is_local_discovery_text(lowered):
+            return ExecutionDecisionModel(
+                tier="lookup",
+                need_pipeline=True,
+                need_tools=True,
+                confidence=0.88,
+                reason="local_discovery_detected",
             )
 
         if len(sub_tasks) >= 2:

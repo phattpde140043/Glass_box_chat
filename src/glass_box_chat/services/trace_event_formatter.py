@@ -147,7 +147,7 @@ def build_tool_result_detail(trace_entry: dict[str, str]) -> str:
     outcome = "succeeded" if trace_entry["success"] == "true" else "failed"
     return (
         f"Step {trace_entry['node_id']} {outcome}. "
-        f"Primary result: {trace_entry['output']}"
+        f"The result payload was recorded in runtime state for skill '{trace_entry['skill_name']}'."
     )
 
 
