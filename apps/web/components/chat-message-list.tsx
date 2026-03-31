@@ -22,7 +22,7 @@ export function ChatMessageList({ isSending, messages }: ChatMessageListProps) {
             <div>{message.content}</div>
             {message.role === "assistant" && message.sourceDetails && message.sourceDetails.length > 0 ? (
               <div className="message-sources">
-                <strong>Nguon tham khao:</strong>
+                <strong>Sources:</strong>
                 <div className="message-source-list">
                   {message.sourceDetails.map((sourceDetail) => (
                     <a key={sourceDetail.url} href={sourceDetail.url} target="_blank" rel="noreferrer">
@@ -34,7 +34,7 @@ export function ChatMessageList({ isSending, messages }: ChatMessageListProps) {
               </div>
             ) : message.role === "assistant" && message.sources && message.sources.length > 0 ? (
               <div className="message-sources">
-                <strong>Nguon tham khao:</strong>
+                <strong>Sources:</strong>
                 <div className="message-source-list">
                   {message.sources.map((source) => (
                     <a key={source} href={source} target="_blank" rel="noreferrer">
@@ -50,7 +50,7 @@ export function ChatMessageList({ isSending, messages }: ChatMessageListProps) {
 
       {isSending ? (
         <article className="message-row assistant">
-          <div className="message-bubble assistant loading">Đang nhận phản hồi...</div>
+          <div className="message-bubble assistant loading">Waiting for response...</div>
         </article>
       ) : null}
     </div>

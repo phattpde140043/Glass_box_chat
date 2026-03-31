@@ -26,7 +26,7 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
 
-  return "Đã xảy ra lỗi không xác định khi giao tiếp với API.";
+  return "An unknown error occurred while communicating with the API.";
 }
 
 async function extractRouteError(response: Response): Promise<string> {
@@ -36,14 +36,20 @@ async function extractRouteError(response: Response): Promise<string> {
       return payload.error;
     }
   } catch {
-    return `API nội bộ trả về lỗi HTTP ${response.status}.`;
+    return `Internal API returned HTTP error ${response.status}.`;
   }
 
-  return `API nội bộ trả về lỗi HTTP ${response.status}.`;
+  return `Internal API returned HTTP error ${response.status}.`;
 }
 
-export async function runChatStream(prompt: string, handlers: RunChatStreamHandlers): Promise<void> {
-  const payload = RunChatRequestModel.fromPrompt(prompt).toJSON();
+export async function runChatStream(
+  prompt: string,
+  handlers: RunChatStreamHandlers & { sessionId?: string; messageId?: string }
+): Promise<void> {
+  // Accept sessionId and messageId and include in payload if provided
+  const sessionId = handlers.sessionId || "dummy-session";
+  const messageId = handlers.messageId || `msg-${crypto.randomUUID()}`;
+  const payload = RunChatRequestModel.fromPrompt(prompt, sessionId, messageId).toJSON();
 
   const response = await fetchWithRequestLog("/api/chat/run", {
     method: "POST",
@@ -58,7 +64,7 @@ export async function runChatStream(prompt: string, handlers: RunChatStreamHandl
   }
 
   if (!response.body) {
-    throw new Error("Không nhận được stream phản hồi từ API nội bộ.");
+    throw new Error("No response stream received from the internal API.");
   }
 
   await consumeEventStream(response.body, {
@@ -81,7 +87,7 @@ export async function runChatStream(prompt: string, handlers: RunChatStreamHandl
         throw new Error(errorPayload.error);
       }
 
-      throw new Error(`Nhận được loại SSE event không hỗ trợ: ${event}`);
+      throw new Error(`Received unsupported SSE event type: ${event}`);
     },
   }).catch((error) => {
     throw new Error(toErrorMessage(error));

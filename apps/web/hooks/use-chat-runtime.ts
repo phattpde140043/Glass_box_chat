@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type UIEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type FormEvent, type KeyboardEvent, type UIEvent } from "react";
 import { runChatStream } from "../actions/chat-stream-action";
 import { ChatMessageModel, initialAssistantMessage } from "../models/chat-message";
 import { RunChatRequestModel } from "../models/chat-run-request";
@@ -21,10 +21,10 @@ const INPUT_MAX_LENGTH = 2000;
 
 function buildRequestFailureMessage(error: unknown): string {
   if (error instanceof Error) {
-    return `Không gửi được yêu cầu tới backend. Lỗi: ${error.message}. Vui lòng kiểm tra API đang chạy ở cổng 8000.`;
+    return `Could not send the request to the backend. Error: ${error.message}. Please verify the API is running on port 8000.`;
   }
 
-  return "Không gửi được yêu cầu tới backend. Vui lòng kiểm tra API đang chạy ở cổng 8000.";
+  return "Could not send the request to the backend. Please verify the API is running on port 8000.";
 }
 
 function mergeTraceEvents(...eventGroups: TraceEventRecord[][]): TraceEventRecord[] {
@@ -86,9 +86,21 @@ function mergeTraceEvents(...eventGroups: TraceEventRecord[][]): TraceEventRecor
 
 export function useChatRuntime() {
   const traceListRef = useRef<HTMLDivElement | null>(null);
+  // Generate a unique sessionId per window/tab and persist for the session
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      let existing = window.sessionStorage.getItem("chat_session_id");
+      if (!existing) {
+        existing = `session-${crypto.randomUUID()}`;
+        window.sessionStorage.setItem("chat_session_id", existing);
+      }
+      setSessionId(existing);
+    }
+  }, []);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([initialAssistantMessage]);
   const [inputValue, setInputValue] = useState("");
-  const [inputError, setInputError] = useState<string | null>(RunChatRequestModel.getValidationMessage(""));
+  const [inputError, setInputError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("done");
 
@@ -113,15 +125,29 @@ export function useChatRuntime() {
     visibleTraceCount,
   } = useTraceStore();
 
+  // Only show trace events for this sessionId
+  const sessionTraceEvents = useMemo(
+    () => traceEvents.filter(e => !sessionId || e.sessionId === sessionId || e.sessionId === "system"),
+    [traceEvents, sessionId]
+  );
   const groupedVisibleTraceSessions = useMemo(
-    () => TraceEventModel.groupVisible(traceEvents, visibleTraceCount),
-    [traceEvents, visibleTraceCount],
+    () => TraceEventModel.groupVisibleByMessage(sessionTraceEvents, visibleTraceCount),
+    [sessionTraceEvents, visibleTraceCount],
   );
-  const hiddenTraceCount = Math.max(0, traceEvents.length - visibleTraceCount);
+  const hiddenTraceCount = Math.max(0, sessionTraceEvents.length - visibleTraceCount);
   const canSend = useMemo(
-    () => inputValue.trim().length > 0 && !isSending && !inputError,
-    [inputError, inputValue, isSending],
+    () => Boolean(sessionId) && inputValue.trim().length > 0 && !isSending && !inputError,
+    [inputError, inputValue, isSending, sessionId],
   );
+
+  useEffect(() => {
+    if (!sessionId) {
+      setInputError(null);
+      return;
+    }
+
+    setInputError(RunChatRequestModel.getValidationMessage(inputValue, sessionId));
+  }, [inputValue, sessionId]);
 
   useEffect(() => {
     let isMounted = true;
@@ -211,7 +237,6 @@ export function useChatRuntime() {
 
   const handleInputChange = (value: string) => {
     setInputValue(value);
-    setInputError(RunChatRequestModel.getValidationMessage(value));
   };
 
   const handleTraceScroll = (event: UIEvent<HTMLDivElement>) => {
@@ -240,18 +265,22 @@ export function useChatRuntime() {
     setShowScrollToLatest(false);
   };
 
-  const sendMessage = async (text: string) => {
-    if (isSending) {
+  const sendMessage = useCallback(async (text: string) => {
+    if (!sessionId || isSending) {
       return;
     }
 
-    const validationMessage = RunChatRequestModel.getValidationMessage(text);
+    const validationMessage = RunChatRequestModel.getValidationMessage(text, sessionId);
     setInputError(validationMessage);
     if (validationMessage) {
       return;
     }
 
-    const request = RunChatRequestModel.fromPrompt(text);
+    // Generate a unique messageId for this message
+    const messageId = `msg-${crypto.randomUUID()}`;
+    
+    // Pass sessionId and messageId in the request
+    const request = RunChatRequestModel.fromPrompt(text, sessionId, messageId);
     const userMessage = ChatMessageModel.user(request.prompt).toJSON();
 
     setMessages((previousMessages) => [...previousMessages, userMessage]);
@@ -259,11 +288,13 @@ export function useChatRuntime() {
     useTraceStore.setState({ expandedSupportingEvents: {} });
     setAgentStatus("running");
     setInputValue("");
-    setInputError(RunChatRequestModel.getValidationMessage(""));
+    setInputError(RunChatRequestModel.getValidationMessage("", sessionId));
     setIsSending(true);
 
     try {
       await runChatStream(request.prompt, {
+        sessionId,
+        messageId,
         onAssistantMessage: (content, sources, sourceDetails) => {
           setMessages((previousMessages) => [
             ...previousMessages,
@@ -271,8 +302,10 @@ export function useChatRuntime() {
           ]);
         },
         onTraceEvent: (event) => {
-          appendTraceEvent(event);
-          resetSessionExpansionsForSession(event.sessionId);
+          if (event.sessionId === sessionId || event.sessionId === "system") {
+            appendTraceEvent(event);
+            resetSessionExpansionsForSession(event.sessionId);
+          }
         },
       });
 
@@ -292,7 +325,7 @@ export function useChatRuntime() {
     } finally {
       setIsSending(false);
     }
-  };
+  }, [isSending, sessionId, appendTraceEvent, resetSessionExpansionsForSession]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -328,7 +361,8 @@ export function useChatRuntime() {
     runtimeMetrics,
     toggleSession,
     toggleSupportingEvents,
-    traceEvents,
+    traceEvents: sessionTraceEvents,
     traceListRef,
+    sessionId,
   };
 }
