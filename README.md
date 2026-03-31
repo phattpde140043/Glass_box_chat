@@ -11,27 +11,25 @@ It is an AI chat application with a live transparency layer.
 It streams the agent workflow to the screen in real time.
 You can watch thoughts, tool calls, sub-agent activity, and completion states as they happen.
 
-This project is built as a debugging interface for AI agents.
+This project acts as a debugging interface for AI agent systems.
 It helps users understand, test, and trust the system.
+
+Each user request is treated as an isolated execution pipeline,
+with full observability from input to final response.
 
 ---
 
 ## Design Documents
 
-Technical design documents are available in two forms:
+Detailed technical documentation:
 
-### In this repository
-
+- [Project Specification](docs/spec.md)
 - [Pipeline Architecture](docs/pipeline-architecture.md)
 - [Agent Execution Flow](docs/agent-execution.md)
 
-### On GitHub Wiki
+These documents cover:
 
-- [Pipeline Architecture](https://github.com/phattpde140043/Glass_box_chat/wiki/Pipeline-Architecture)
-- [Agent Execution Architecture](https://github.com/phattpde140043/Glass_box_chat/wiki/Agent-execution--Architecture)
-
-These documents explain the system from two angles:
-
+- scope, requirements, and evaluation criteria
 - end-to-end runtime pipeline and streaming architecture
 - internal agent execution lifecycle and orchestration model
 
@@ -77,18 +75,18 @@ You can also run the full project locally:
 - Backend: `./run-backend.sh` or `run-backend.cmd`
 - Frontend: `./run-frontend.sh` or `run-frontend.cmd`
 
-Recommended demo views:
+Recommended demo walkthrough:
 
-- Chat interface
-- Execution trace panel
-- Tool call visualization
-- Multi-step reasoning flow
+- Observe real-time thinking events during execution
+- Watch tool calls and results appear in the trace
+- Follow sub-agent orchestration across multiple steps
+- Review the full execution trace after a run completes
 
 ---
 
 ## What It Looks Like
 
-The interface is designed to make agent execution observable in real time.
+The system exposes agent execution in real time through a structured trace interface.
 
 - **Chat Panel**: standard conversational interface for user input and AI output
 - **Execution Trace Panel**: structured live view of the runtime
@@ -289,15 +287,11 @@ packages/
   types/        # Shared types and Zod schemas
   runtime/      # Runtime adapter package
 docs/
-  migration/    # Migration notes and checkpoints
+  spec.md                   # Project specification
+  pipeline-architecture.md  # System flow and streaming design
+  agent-execution.md        # Runtime execution and agent lifecycle
+  migration/                # Migration notes and checkpoints
 ```
-
----
-
-## Design Doc Status
-
-This README is the current one-page design summary for the project.
-A separate design document can be added later under `docs/` if needed.
 
 ---
 
@@ -334,7 +328,7 @@ pnpm --filter web test
 
 ## Future Improvements
 
-- Public demo deployment
+- ✅ Public demo deployment (live at glass-box-chat-web.vercel.app)
 - Screenshot or GIF walkthrough
 - Persistent trace storage
 - RAG support
