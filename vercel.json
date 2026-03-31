@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "pnpm --filter glass-box-web build",
-  "installCommand": "corepack enable && corepack prepare pnpm@9.15.9 --activate && pnpm install --frozen-lockfile",
+  "installCommand": "npm install -g pnpm@9.15.9 && pnpm install --frozen-lockfile",
   "framework": "nextjs"
 }

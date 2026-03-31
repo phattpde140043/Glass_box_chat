@@ -4,7 +4,7 @@
   "private": true,
   "description": "The Glass Box - Agent Runtime Platform",
   "engines": {
-    "node": "20.x"
+    "node": ">=20"
   },
   "scripts": {
     "dev": "turbo run dev",
