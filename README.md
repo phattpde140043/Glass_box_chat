@@ -59,6 +59,17 @@ This project adds a clear visibility layer on top of the AI runtime.
 
 The demo shows the live trace panel, tool call visualization, and multi-step reasoning flow in action.
 
+Live demo server:
+
+- **[https://glass-box-chat-web.vercel.app/](https://glass-box-chat-web.vercel.app/)**
+
+Demo server note:
+
+- The public demo server is running with limited resources.
+- Response times may be slower than local development because the deployment uses free-tier infrastructure.
+- Cold starts can happen occasionally, so the first request may be slow or may time out.
+- Please try again after a short wait if the first request does not respond in time.
+
 ---
 
 You can also run the full project locally:
