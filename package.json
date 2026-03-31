@@ -1,0 +1,19 @@
+{
+  "name": "the-glass-box",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The Glass Box - Agent Runtime Platform",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "turbo": "latest",
+    "prettier": "latest",
+    "eslint": "latest",
+    "typescript": "latest"
+  },
+  "packageManager": "pnpm@9.0.0"
+}
