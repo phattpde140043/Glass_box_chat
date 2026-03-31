@@ -27,84 +27,76 @@ from .result_formatting import (
 
 
 class FinalResponseBuilder:
-    @staticmethod
-    def _is_english_prompt(analysis: AnalysisResult) -> bool:
-        prompt = str(analysis.get("normalized_prompt") or analysis.get("original_prompt") or "").strip()
-        if not prompt:
-            return False
-
-        # Vietnamese uses distinctive Unicode diacritic characters; their presence is definitive
-        if re.search(
-            r"[àáảãạăắặằẳẵâấậầẩẫèéẻẽẹêếệềểễìíỉĩịòóỏõọôốộồổỗơớợờởỡùúủũụưứựừửữỳýỷỹỵđ]",
-            prompt,
-            re.IGNORECASE,
-        ):
-            return False
-
-        # No Unicode diacritics — check for transliterated Vietnamese marker words
-        tokens = [t for t in re.split(r"[^a-z']+", prompt.lower()) if t]
-        vietnamese_markers = {
-            "toi", "ngay", "mai", "du", "bao", "thoi", "tiet", "nhan",
-            "dinh", "phan", "tich", "gia", "thi", "truong",
-        }
-        vietnamese_score = sum(1 for token in tokens if token in vietnamese_markers)
-        # No Vietnamese signals at all → treat as English
-        return vietnamese_score == 0
+    _DISCLAIMER_PREFIXES = (
+        "disclaimer:",
+        "note:",
+        "warning:",
+        "additional note:",
+    )
 
     @classmethod
     def _evidence_section_title(cls, analysis: AnalysisResult) -> str:
-        return "Evidence used:" if cls._is_english_prompt(analysis) else "Dan chung da su dung:"
+        _ = analysis
+        return "Evidence used:"
 
     @classmethod
     def _source_label(cls, analysis: AnalysisResult) -> str:
-        return "Source" if cls._is_english_prompt(analysis) else "Nguon"
+        _ = analysis
+        return "Source"
 
     @classmethod
     def _no_data_message(cls, analysis: AnalysisResult) -> str:
-        if cls._is_english_prompt(analysis):
-            return "I do not have enough verified information to answer that yet."
-        return "Tôi chưa có đủ dữ liệu để trả lời."
+        _ = analysis
+        return "I do not have enough verified information to answer that yet."
 
     @classmethod
     def _runtime_failure_message(cls, analysis: AnalysisResult) -> str:
-        if cls._is_english_prompt(analysis):
-            return (
-                "I could not verify that request with the available local evidence. "
-                "Please provide more context or try a query that the current data sources can support."
-            )
+        _ = analysis
         return (
-            "Tôi chưa thể xác minh yêu cầu này bằng dữ liệu hiện có trong hệ thống. "
-            "Hãy cung cấp thêm ngữ cảnh hoặc thử một truy vấn phù hợp hơn với nguồn dữ liệu hiện tại."
+            "I could not verify that request with the available local evidence. "
+            "Please provide more context or try a query that the current data sources can support."
         )
 
     @classmethod
     def _low_coverage_notice(cls, analysis: AnalysisResult) -> str:
-        if cls._is_english_prompt(analysis):
-            return (
-                "Note: some conclusions in this answer have not yet been fully cross-checked against the collected evidence. "
-                "Please verify with independent sources before using it for important decisions."
-            )
+        _ = analysis
         return (
-            "Luu y: mot so ket luan trong cau tra loi hien chua duoc doi chieu day du voi dan chung da thu thap. "
-            "Can xac minh them voi nguon doc lap neu dung cho quyet dinh quan trong."
+            "Disclaimer: this answer may be incomplete or provisional because the available evidence is limited, "
+            "unverified, or conflicting; verify it with independent sources before using it for important decisions."
         )
 
     @classmethod
     def _conflict_notice(cls, analysis: AnalysisResult) -> str:
-        if cls._is_english_prompt(analysis):
-            return "Note: the input data shows conflicting signals across sources, so the conclusion is presented cautiously."
-        return "Luu y: du lieu dau vao co dau hieu xung dot giua cac nguon, vi vay ket luan duoc trinh bay o muc than trong."
+        return cls._low_coverage_notice(analysis)
 
     @classmethod
     def _cross_niche_notice(cls, analysis: AnalysisResult) -> str:
-        if cls._is_english_prompt(analysis):
-            return (
-                "Additional note: there are cross-niche conflicts between quantitative and analytical sources, "
-                "so this should be cross-checked before making a decision."
-            )
-        return (
-            "Luu y bo sung: co xung dot cheo giua nguon dinh luong va nguon phan tich, can doi chieu them truoc khi ra quyet dinh."
-        )
+        return cls._low_coverage_notice(analysis)
+
+    @classmethod
+    def _looks_like_notice_paragraph(cls, paragraph: str) -> bool:
+        normalized = paragraph.strip().lower()
+        if not normalized:
+            return False
+        return any(normalized.startswith(prefix) for prefix in cls._DISCLAIMER_PREFIXES)
+
+    @classmethod
+    def _strip_leading_notice_paragraphs(cls, answer: str) -> tuple[str, bool]:
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", answer.strip()) if part.strip()]
+        if not paragraphs:
+            return answer.strip(), False
+
+        stripped_any = False
+        kept: list[str] = []
+        skipping = True
+        for paragraph in paragraphs:
+            if skipping and cls._looks_like_notice_paragraph(paragraph):
+                stripped_any = True
+                continue
+            skipping = False
+            kept.append(paragraph)
+
+        return "\n\n".join(kept) if kept else "", stripped_any
 
     @staticmethod
     def _is_error_output(text: str) -> bool:
@@ -132,9 +124,7 @@ class FinalResponseBuilder:
         if len(lines) == 1:
             return answer
 
-        # Avoid appending if any evidence/source section is already present in the answer.
-        # Matches patterns like "Evidence used:", "Dan chung da su dung:", "Dẫn chứng đã sử dụng:".
-        if re.search(r"Evidence used\s*:|Sources used\s*:|References\s*:|Dan chung|Dẫn chứng", answer, re.IGNORECASE):
+        if re.search(r"Evidence used\s*:|Sources used\s*:|References\s*:", answer, re.IGNORECASE):
             return answer
         if section_title in answer:
             return answer
@@ -172,6 +162,7 @@ class FinalResponseBuilder:
         evidence_ledger = collect_reasoning_evidence_from_results(results)
         selected_answer, had_runtime_failure = self.select_final_answer(results, analysis)
         answer = sanitize_text_for_plain_ui(selected_answer)
+        answer, had_existing_notice = self._strip_leading_notice_paragraphs(answer)
         answer = self._append_evidence_section(answer, evidence_ledger, analysis)
         coverage = compute_claim_evidence_coverage(answer, evidence_ledger)
         conflict = compute_reasoning_conflict_score(results)
@@ -201,17 +192,20 @@ class FinalResponseBuilder:
         
         niche_summary = generate_niche_summary(niche_coverage)
         
-        if evidence_ledger and not had_runtime_failure and coverage["coverageRatio"] < 0.5 and coverage["claimCount"] >= 1:
+        needs_disclaimer = had_existing_notice or (
+            not had_runtime_failure
+            and (
+                (coverage["coverageRatio"] < 0.5 and coverage["claimCount"] >= 1)
+                or conflict["conflictScore"] >= 0.45
+                or bool(cross_niche_contradictions)
+            )
+        )
+        if needs_disclaimer:
             answer = f"{self._low_coverage_notice(analysis)}\n\n{answer}"
-        if evidence_ledger and not had_runtime_failure and conflict["conflictScore"] >= 0.45:
-            answer = f"{self._conflict_notice(analysis)}\n\n{answer}"
         
         # Append contradiction summary if present
         if contradiction_summary:
             answer = f"{answer}\n\n{contradiction_summary}"
-
-        if cross_niche_contradictions:
-            answer = f"{answer}\n\n{self._cross_niche_notice(analysis)}"
         
         payload: dict[str, Any] = {
             "type": "assistant_message",

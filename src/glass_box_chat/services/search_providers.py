@@ -296,17 +296,11 @@ def is_commodity_query(query: str) -> bool:
         token in lowered
         for token in (
             "coffee",
-            "cà phê",
-            "ca phe",
             "cafe",
             "arabica",
             "robusta",
             "commodity",
-            "nông sản",
-            "nong san",
             "pepper",
-            "hồ tiêu",
-            "ho tieu",
         )
     )
 
@@ -315,42 +309,26 @@ def detect_search_intent(query: str) -> SearchIntent:
     lowered = query.lower()
     
     # Check high-priority intents FIRST to avoid false positives from location mentions
-    if any(token in lowered for token in ("weather", "thời tiết", "thoi tiet", "forecast", "dự báo", "du bao", "nhiệt độ", "nhiet do")):
+    if any(token in lowered for token in ("weather", "forecast", "temperature")):
         return "weather_live"
-    if any(token in lowered for token in ("news", "tin tức", "tin tuc", "headline", "mới nhất", "moi nhat")):
+    if any(token in lowered for token in ("news", "headline", "latest")):
         return "news_live"
-    if any(token in lowered for token in ("stock", "market", "crypto", "gia vang", "giá vàng", "gold price", "xau", "xauusd", "bitcoin", "btc", "ethereum", "eth", "tỷ giá", "ty gia", "exchange rate", "forex", "chứng khoán", "chung khoan", "coffee", "cà phê", "ca phe", "cafe", "arabica", "robusta", "commodity", "nông sản", "nong san", "pepper", "hồ tiêu", "ho tieu")):
+    if any(token in lowered for token in ("stock", "market", "crypto", "gold price", "xau", "xauusd", "bitcoin", "btc", "ethereum", "eth", "exchange rate", "forex", "coffee", "cafe", "arabica", "robusta", "commodity", "pepper")):
         return "market_live"
     
     # Then check local_discovery and travel_planning
     if any(
         token in lowered
         for token in (
-            "nhà hàng",
-            "nha hang",
             "restaurant",
-            "quán ăn",
-            "quan an",
-            "khách sạn",
-            "khach san",
             "hotel",
             "resort",
             "homestay",
             "attraction",
-            "địa điểm",
-            "dia diem",
-            "điểm đến",
-            "diem den",
-            "du lịch",
-            "du lich",
             "travel",
-            "lịch trình",
-            "lich trinh",
             "itinerary",
             "things to do",
             "near me",
-            "gần đây",
-            "gan day",
             "food",
             "foods",
             "eat",
@@ -378,7 +356,7 @@ def detect_search_intent(query: str) -> SearchIntent:
             "vacation",
         )
     ):
-        if any(token in lowered for token in ("itinerary", "lịch trình", "lich trinh", "2 ngày", "3 ngày", "plan trip", "kế hoạch", "ke hoach")):
+        if any(token in lowered for token in ("itinerary", "2 day", "3 day", "plan trip", "trip plan")):
             return "travel_planning"
         return "local_discovery"
     
@@ -763,8 +741,11 @@ class OpenMeteoWeatherProvider:
             weather_codes = list(daily.get("weathercode") or [])
 
             if dates:
+                # For "tomorrow" mode, expand window to 3 days for better forecast context.
+                # For "forecast" mode, also return 3 days (unless explicitly more requested).
                 start_index = 1 if mode == "tomorrow" and len(dates) > 1 else 0
-                end_index = min(len(dates), start_index + (1 if mode == "tomorrow" else 3))
+                day_window = 3  # Always return 3-day forecast for richer data
+                end_index = min(len(dates), start_index + day_window)
                 for idx in range(start_index, end_index):
                     day_label = str(dates[idx])
                     temp_min = min_temps[idx] if idx < len(min_temps) else "n/a"
@@ -1157,7 +1138,17 @@ class OpenStreetMapLocalProvider:
     @staticmethod
     def _extract_location(query: str) -> str | None:
         lowered = query.lower()
-        for city in ("milan", "milano", "hanoi", "ha noi", "da nang", "ho chi minh", "saigon", "nha trang", "da lat"):
+        # Extended city list: Vietnamese + major global cities
+        _KNOWN_CITIES = (
+            "milan", "milano", "hanoi", "ha noi", "da nang", "ho chi minh", "saigon",
+            "nha trang", "da lat", "hue", "phu quoc",
+            "tokyo", "osaka", "kyoto", "hiroshima", "yokohama",
+            "seoul", "busan", "bangkok", "singapore", "kuala lumpur", "jakarta",
+            "paris", "berlin", "london", "rome", "amsterdam", "barcelona", "madrid",
+            "new york", "los angeles", "chicago", "sydney", "dubai", "hong kong",
+            "beijing", "shanghai", "taipei", "mumbai", "delhi",
+        )
+        for city in _KNOWN_CITIES:
             if city in lowered:
                 return city
 
@@ -1206,6 +1197,7 @@ class OpenStreetMapLocalProvider:
             if not isinstance(payload, list) or not payload:
                 continue
 
+            expected_loc = self._extract_location(candidate)
             docs: list[SearchDocument] = []
             for item in payload[: max(1, min(limit, 10))]:
                 if not isinstance(item, dict):
@@ -1217,6 +1209,17 @@ class OpenStreetMapLocalProvider:
                 lon = str(item.get("lon", "")).strip()
                 if not display_name:
                     continue
+                # City filter: use Nominatim's structured address to exclude wrong-city results
+                # (e.g., reject "Tokyo In April" restaurant in Vancouver for a Tokyo query).
+                if expected_loc:
+                    address_dict = item.get("address") if isinstance(item.get("address"), dict) else {}
+                    if address_dict:
+                        item_city = (
+                            address_dict.get("city") or address_dict.get("town")
+                            or address_dict.get("village") or address_dict.get("municipality") or ""
+                        ).lower()
+                        if item_city and expected_loc.lower() not in item_city and item_city not in expected_loc.lower():
+                            continue
 
                 osm_id = str(item.get("osm_id", "")).strip()
                 osm_entity_type = str(item.get("osm_type", "node")).strip() or "node"
@@ -1397,7 +1400,23 @@ class PolicyDrivenSearchProvider:
         )
 
     async def search(self, query: str, limit: int = 5) -> SearchResultBatch:
-        intent = detect_search_intent(query)
+        return await self.search_with_intent(query, limit=limit)
+
+    async def search_with_intent(
+        self,
+        query: str,
+        limit: int = 5,
+        intent_override: SearchIntent | None = None,
+    ) -> SearchResultBatch:
+        """Like ``search()`` but allows the caller to pin the intent, bypassing
+        ``detect_search_intent``.  Used by WeatherTool to force
+        ``weather_live`` even when the raw query phrase is implicit (e.g.
+        "picnic tomorrow").
+
+        When ``intent_override`` is *None* the behaviour is identical to
+        ``search()``.
+        """
+        intent: SearchIntent = intent_override if intent_override is not None else detect_search_intent(query)
         started_at = time.perf_counter()
         cache_ttl_seconds = self._policy.cache_ttl_seconds(intent)
 

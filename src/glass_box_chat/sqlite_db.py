@@ -148,6 +148,10 @@ def create_runtime_session(session_id: str, label: str, tenant_id: str | None = 
             """
             INSERT INTO runtime_sessions (id, tenant_id, label, status, created_at, updated_at)
             VALUES (?, ?, ?, 'running', ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                label = excluded.label,
+                status = 'running',
+                updated_at = excluded.updated_at
             """,
             (session_id, tenant_id, label, now, now),
         )

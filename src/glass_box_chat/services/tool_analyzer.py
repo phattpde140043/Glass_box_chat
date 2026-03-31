@@ -17,8 +17,6 @@ class ToolAnalyzer:
     """Analyze user input to suggest appropriate tools for execution."""
 
     MARKET_HINTS = (
-        "gia vang",
-        "giá vàng",
         "gold price",
         "xau",
         "xauusd",
@@ -27,31 +25,24 @@ class ToolAnalyzer:
         "btc",
         "ethereum",
         "eth",
-        "ty gia",
-        "tỷ giá",
         "exchange rate",
         "forex",
     )
 
     LOCAL_DISCOVERY_HINTS = (
         "restaurant",
-        "nhà hàng",
-        "nha hang",
-        "quán ăn",
-        "quan an",
+        "restaurants",
         "hotel",
-        "khách sạn",
-        "khach san",
+        "hotels",
         "resort",
+        "resorts",
         "homestay",
-        "du lịch",
-        "du lich",
+        "homestays",
         "travel",
-        "địa điểm",
-        "dia diem",
-        "điểm đến",
-        "diem den",
+        "trip",
+        "beach",
         "attraction",
+        "attractions",
         "things to do",
         "near me",
     )
@@ -59,7 +50,7 @@ class ToolAnalyzer:
     @staticmethod
     def _contains_hint(text: str, hints: tuple[str, ...]) -> bool:
         lowered = text.lower()
-        tokens = {token for token in re.split(r"[^\wÀ-ỹ]+", lowered) if token}
+        tokens = {token for token in re.split(r"[^\w]+", lowered) if token}
         for hint in hints:
             normalized_hint = hint.lower()
             if " " in normalized_hint:
@@ -84,7 +75,7 @@ class ToolAnalyzer:
             )
         
         # Weather
-        if any(kw in combined_text for kw in ["weather", "thời tiết", "forecast", "nhiệt độ"]):
+        if any(kw in combined_text for kw in ["weather", "forecast", "temperature"]):
             return ToolSuggestion(tool_name="weather", confidence=0.88, reason="Weather query detected")
 
         # Market data (gold/crypto/fx)
@@ -92,7 +83,7 @@ class ToolAnalyzer:
             return ToolSuggestion(tool_name="finance", confidence=0.96, reason="Market price query detected")
         
         # News
-        if any(kw in combined_text for kw in ["news", "tin tức", "headline", "mới nhất"]):
+        if any(kw in combined_text for kw in ["news", "headline", "latest"]):
             return ToolSuggestion(tool_name="news_api", confidence=0.86, reason="News query detected")
 
         # Local/travel discovery
@@ -104,7 +95,7 @@ class ToolAnalyzer:
             )
         
         # Calculator
-        calc_keywords = ["calculate", "tính", "math", "toán", "equation"]
+        calc_keywords = ["calculate", "math", "equation"]
         has_calc_keyword = any(kw in combined_text for kw in calc_keywords)
         has_url = "http://" in query or "https://" in query
         has_math_op = not has_url and any(op in query for op in ["+", "-", "*", "^", "%"])

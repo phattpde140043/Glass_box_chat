@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
+from urllib.parse import urlparse
 
-from .planner import needs_research_text
+from .language_policy import build_response_language_instruction, normalize_language_name
+from .planner import is_weather_text, needs_research_text
 from .result_formatting import (
     AnalysisDataPointModel,
     AnalysisResultEnvelopeModel,
@@ -41,12 +44,26 @@ class BaseLLMSkill:
         except Exception as err:
             return SkillResult(success=False, error=str(err), metadata={"error_type": classify_error(str(err))})
 
+    @staticmethod
+    def _response_language(context: SkillContext) -> str:
+        return normalize_language_name(context.response_language)
+
+    def _with_language_policy(self, prompt: str, context: SkillContext) -> str:
+        return (
+            f"{build_response_language_instruction(self._response_language(context), explicit=context.explicit_response_language)}\n\n"
+            f"{prompt}"
+        )
+
+    def _fallback_text(self, context: SkillContext, *, english: str, vietnamese: str | None = None) -> str:
+        _ = context, vietnamese
+        return english
+
 
 class ResearchSkill(BaseLLMSkill):
     metadata = SkillMetadata(
         name="research",
         description="Research current or external information using a search provider before answering.",
-        examples=["thời tiết hôm nay", "latest news", "giá hiện tại", "tra cứu", "research"],
+        examples=["today weather", "latest news", "current price", "information lookup", "research"],
         priority_weight=0.24,
         input_schema={
             "type": "object",
@@ -66,14 +83,13 @@ class ResearchSkill(BaseLLMSkill):
         "example.local",
         "mock-result",
         "demo",
-        "mô phỏng",
-        "mo phong",
+        "simulation",
     )
 
     _SUBJECT_HINT_GROUPS = (
-        ("cà phê", "ca phe", "cafe", "coffee", "arabica", "robusta"),
-        ("hồ tiêu", "ho tieu", "pepper"),
-        ("gia vang", "giá vàng", "gold", "xau", "xauusd"),
+        ("cafe", "coffee", "arabica", "robusta"),
+        ("pepper",),
+        ("gold", "xau", "xauusd"),
         ("bitcoin", "btc", "ethereum", "eth", "crypto"),
     )
 
@@ -123,13 +139,13 @@ class ResearchSkill(BaseLLMSkill):
         if reason == "mock_only":
             error = "insufficient_live_evidence"
             message = (
-                "Khong co du lieu live dang tin cay cho yeu cau nay. "
-                "He thong da tranh dung source demo/mock de dua ra nhan dinh."
+                "There is no reliable live evidence for this request. "
+                "The system intentionally avoided using demo or mock sources."
             )
         else:
             error = "insufficient_relevant_evidence"
             message = (
-                "Da thu thu thap thong tin nhung chua co du lieu lien quan truc tiep den chu de can phan tich."
+                "The system collected results, but none of them were directly relevant enough to support the request."
             )
 
         return SkillResult(
@@ -269,6 +285,7 @@ class ResearchSkill(BaseLLMSkill):
 
         # Try using selected tool if provided
         search_batch: SearchResultBatch | None = None
+        _failed_tool_result: object | None = None  # capture for fully-orchestrated guard
         if context.selected_tool is not None:
             try:
                 from .tools import ToolInput
@@ -298,6 +315,8 @@ class ResearchSkill(BaseLLMSkill):
                             "error_type": classify_error(error_text),
                         },
                     )
+                else:
+                    _failed_tool_result = tool_result
             except Exception:
                 if strict_market_mode:
                     return SkillResult(
@@ -342,6 +361,24 @@ class ResearchSkill(BaseLLMSkill):
                         "error_type": "transient",
                     },
                 )
+            # If the tool already ran its own full orchestration chain (e.g.
+            # WeatherTool with an injected PolicyDrivenSearchProvider), do not
+            # re-run the same provider chain here.  That would produce duplicate
+            # trace entries and mix providers_tried from two separate runs.
+            if _failed_tool_result is not None:
+                _meta = getattr(_failed_tool_result, "metadata", {}) or {}
+                if _meta.get("tool_fully_orchestrated"):
+                    _error = str(getattr(_failed_tool_result, "error", "") or "tool_orchestration_failed")
+                    return SkillResult(
+                        success=False,
+                        error=_error,
+                        metadata={
+                            **_meta,
+                            "used_tool": selected_tool_name,
+                            "latency_ms": int((time.perf_counter() - started_at) * 1000),
+                            "error_type": classify_error(_error),
+                        },
+                    )
             search_batch = await self._search_provider.search(task_description, limit=4)
 
         raw_documents = list(search_batch.documents)
@@ -363,15 +400,15 @@ class ResearchSkill(BaseLLMSkill):
             for index, document in enumerate(documents)
         )
         prompt = (
-            "Bạn là ResearchSkill. Chỉ được trả lời dựa trên evidence bên dưới. "
-            "Nếu evidence không đủ chắc chắn, phải nói rõ giới hạn. Ưu tiên tiếng Việt.\n\n"
-            f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
-            f"Task nghiên cứu: {task_description}\n"
-            f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
+            "You are ResearchSkill. Answer only from the evidence below. "
+            "If the evidence is weak or incomplete, say so explicitly.\n\n"
+            f"Normalized prompt: {context.normalized_prompt}\n"
+            f"Research task: {task_description}\n"
+            f"Recent memory:\n{context.recent_memory or '- none'}\n"
             f"Evidence:\n{evidence_text}\n\n"
-            "Yêu cầu: viết một đoạn tóm tắt findings ngắn gọn, nêu rõ giới hạn nếu có, không bịa thêm nguồn hay dữ kiện ngoài evidence."
+            "Requirement: write a short findings summary, state limits clearly, and do not invent any facts or sources beyond the evidence."
         )
-        result = await self._generate(prompt)
+        result = await self._generate(self._with_language_policy(prompt, context))
         if result.success:
             summary = extract_result_text(result.data).strip()
             sources = [
@@ -398,7 +435,11 @@ class ResearchSkill(BaseLLMSkill):
             ]
             result.data = ResearchResultEnvelopeModel(
                 kind="research_result",
-                summary=summary or "Không có findings rõ ràng từ evidence hiện tại.",
+                summary=summary or self._fallback_text(
+                    context,
+                    english="There are no clear findings from the current evidence.",
+                    vietnamese="Không có findings rõ ràng từ evidence hiện tại.",
+                ),
                 grounded=True,
                 confidence=search_batch.confidence,
                 citations=[source.url for source in sources],
@@ -428,7 +469,7 @@ class FinanceSkill:
     metadata = SkillMetadata(
         name="finance",
         description="Fetch structured live market data (gold/crypto) without research fallback.",
-        examples=["giá vàng hôm nay", "gold price", "BTC price", "tỷ giá"],
+        examples=["gold price today", "gold price", "BTC price", "exchange rate"],
         priority_weight=0.28,
         input_schema={
             "type": "object",
@@ -441,8 +482,6 @@ class FinanceSkill:
     )
 
     _MARKET_HINTS = (
-        "gia vang",
-        "giá vàng",
         "gold price",
         "xau",
         "xauusd",
@@ -451,15 +490,13 @@ class FinanceSkill:
         "btc",
         "ethereum",
         "eth",
-        "tỷ giá",
-        "ty gia",
         "exchange rate",
         "forex",
     )
 
     def can_handle(self, input_data: dict[str, object]) -> bool:
         text = str(input_data.get("description", "")).lower()
-        tokens = {token for token in re.split(r"[^\wÀ-ỹ]+", text) if token}
+        tokens = {token for token in re.split(r"[^\w]+", text) if token}
         for hint in self._MARKET_HINTS:
             if " " in hint:
                 if hint in text:
@@ -479,8 +516,8 @@ class FinanceSkill:
             tool_result = await tool.execute(ToolInput(query=description, limit=1))
         except Exception as err:
             graceful = (
-                "Hien tai khong the lay gia thi truong real-time do loi ket noi provider.\n\n"
-                "Ban co the thu lai sau it phut hoac tham khao:\n"
+                "Real-time market data is currently unavailable because the provider connection failed.\n\n"
+                "You can try again in a few minutes or check:\n"
                 "- https://www.kitco.com\n"
                 "- https://www.sjc.com.vn"
             )
@@ -517,9 +554,7 @@ class FinanceSkill:
             if not isinstance(source_hints, list) or not source_hints:
                 source_hints = ["https://www.kitco.com", "https://www.sjc.com.vn"]
             source_count = int((tool_result.metadata or {}).get("source_count", 0) or 0)
-            graceful = str(tool_result.content or "").strip() or (
-                "Hien tai khong the lay gia thi truong real-time. Vui long thu lai sau."
-            )
+            graceful = str(tool_result.content or "").strip() or "Real-time market data is currently unavailable. Please try again later."
 
             degraded_sources = [
                 ResearchSourceModel(
@@ -871,22 +906,32 @@ class AnalysisSkill(BaseLLMSkill):
         ]
         if not research_payloads:
             degraded_prompt = (
-                "Ban la AnalysisSkill o che do degraded. Khong co evidence live dang tin cay tu research. "
-                "Hay dua ra nhan dinh tong quat ngan gon dua tren kien thuc co ban, KHONG khang dinh tuyet doi, "
-                "va neu ro can xac minh them truoc khi su dung trong quyet dinh quan trong.\n\n"
-                f"Prompt chuan hoa: {context.normalized_prompt}\n"
-                f"Task phan tich: {task_description}"
+                "You are AnalysisSkill in degraded mode. There is no reliable live research evidence. "
+                "Provide a short general assessment using baseline knowledge only, do not overclaim, "
+                "and clearly state that independent verification is still needed.\n\n"
+                f"Normalized prompt: {context.normalized_prompt}\n"
+                f"Analysis task: {task_description}"
             )
-            degraded = await self._generate(degraded_prompt)
+            degraded = await self._generate(self._with_language_policy(degraded_prompt, context))
             if not degraded.success:
                 return degraded
 
-            degraded_summary = extract_result_text(degraded.data).strip() or "Khong du evidence live; day la nhan dinh tong quat tam thoi."
-            degraded_summary = (
-                "Luu y: khong du du lieu dang tin cay tu nguon live, phan hoi duoi day chi dua tren thong tin co ban. "
-                "Ban can xac minh lai truoc khi su dung cho muc dich khac.\n\n"
-                f"{degraded_summary}"
+            degraded_summary = extract_result_text(degraded.data).strip() or self._fallback_text(
+                context,
+                english="There is not enough live evidence, so this is only a temporary general assessment.",
+                vietnamese="There is not enough live evidence, so this is only a temporary general assessment.",
             )
+            degraded_summary = self._fallback_text(
+                context,
+                english=(
+                    "Disclaimer: there is not enough reliable live evidence, so the response below is based only on general knowledge. "
+                    "Please verify it before using it for other purposes.\n\n"
+                ),
+                vietnamese=(
+                    "Disclaimer: there is not enough reliable live evidence, so the response below is based only on general knowledge. "
+                    "Please verify it before using it for other purposes.\n\n"
+                ),
+            ) + degraded_summary
             payload = AnalysisResultEnvelopeModel(
                 kind="analysis_result",
                 summary=degraded_summary,
@@ -930,23 +975,23 @@ class AnalysisSkill(BaseLLMSkill):
         evidence_block = "\n".join(evidence_lines)
 
         prompt = (
-            "Ban la AnalysisSkill. Nhiem vu: phan tich xu huong dua tren research evidence da co, "
-            "khong bo sung fact moi ngoai evidence. Viet bang tieng Viet, ngan gon nhung ro logic.\n\n"
-            f"Prompt chuan hoa: {context.normalized_prompt}\n"
-            f"Task phan tich: {task_description}\n"
-            f"Memory gan day:\n{context.recent_memory or '- none'}\n"
-            f"Evidence tong hop:\n{evidence_block}\n\n"
-            "Tra ve DUNG format 4 muc trong van ban thuong:\n"
-            "1) Ket luan xu huong\n"
-            "2) Lap luan chinh\n"
-            "3) Dan chung da dung (moi y gan voi nguon URL cu the)\n"
-            "4) Gioi han/gia dinh va muc do chac chan"
+            "You are AnalysisSkill. Analyze the trend from the existing research evidence only. "
+            "Do not add facts beyond the evidence. Keep the answer concise and logically structured.\n\n"
+            f"Normalized prompt: {context.normalized_prompt}\n"
+            f"Analysis task: {task_description}\n"
+            f"Recent memory:\n{context.recent_memory or '- none'}\n"
+            f"Evidence summary:\n{evidence_block}\n\n"
+            "Return plain text with exactly four sections:\n"
+            "1) Trend conclusion\n"
+            "2) Main reasoning\n"
+            "3) Evidence used (each point must include a source URL when available)\n"
+            "4) Limits, assumptions, and confidence"
         )
-        result = await self._generate(prompt)
+        result = await self._generate(self._with_language_policy(prompt, context))
         if not result.success:
             return result
 
-        summary = extract_result_text(result.data).strip() or "Khong du thong tin de ket luan xu huong mot cach chac chan."
+        summary = extract_result_text(result.data).strip() or "There is not enough information to reach a confident trend conclusion."
         signals: list[str] = []
         for payload in research_payloads:
             snippet = payload.summary.strip()
@@ -1048,8 +1093,8 @@ class AnalysisSkill(BaseLLMSkill):
 class GeneralAnswerSkill(BaseLLMSkill):
     metadata = SkillMetadata(
         name="general_answer",
-        description="General purpose question answering and explanation skill in Vietnamese.",
-        examples=["giải thích", "tại sao", "how it works", "khái niệm"],
+        description="General purpose question answering and explanation skill in English.",
+        examples=["explain", "why", "how it works", "concept"],
         priority_weight=0.05,
         input_schema={
             "type": "object",
@@ -1069,22 +1114,14 @@ class GeneralAnswerSkill(BaseLLMSkill):
     def _infer_conversation_mode(text: str) -> str:
         lowered = text.lower().strip()
         greeting_hints = (
-            "xin chao",
-            "xin chào",
-            "chao",
-            "chào",
             "hello",
             "hi",
             "hey",
         )
         request_hints = (
-            "giup",
-            "giúp",
-            "hay",
-            "hãy",
-            "co the",
-            "có thể",
             "please",
+            "can you",
+            "could you",
         )
 
         if any(token in lowered for token in greeting_hints) and len(lowered.split()) <= 6:
@@ -1097,19 +1134,19 @@ class GeneralAnswerSkill(BaseLLMSkill):
         task_description = str(context.input.get("description", ""))
         conversation_mode = self._infer_conversation_mode(task_description or context.normalized_prompt)
         prompt = (
-            "Bạn là GeneralAnswerSkill. Trả lời ngắn gọn, tự nhiên, bằng tiếng Việt, theo đúng ngữ cảnh hội thoại.\n"
-            "Quy tắc:\n"
-            "- Nếu đây là greeting: trả lời thân thiện, ngắn, không lặp lại nguyên văn câu user.\n"
-            "- Nếu đây là statement/context người dùng đang chia sẻ: không được chỉ echo lại câu user. Hãy phản hồi tự nhiên bằng cách ghi nhận thông tin, thể hiện tiếp nối hội thoại, và khi phù hợp thì hỏi 1 câu follow-up hữu ích hoặc gợi ý hỗ trợ liên quan.\n"
-            "- Nếu đây là question/request: trả lời trực tiếp, rõ ý, tránh lan man.\n"
-            "- Không bịa dữ kiện bên ngoài prompt/memory.\n"
-            "- Tránh mở đầu máy móc như 'Bạn nói rằng...' hoặc chép lại nguyên câu user.\n\n"
+            "You are GeneralAnswerSkill. Reply briefly and naturally in English while following the current conversational context.\n"
+            "Rules:\n"
+            "- If this is a greeting: reply warmly, briefly, and do not repeat the user's wording verbatim.\n"
+            "- If this is a statement or shared context: do not simply echo the user. Acknowledge the information, continue the conversation naturally, and when useful ask one follow-up question or offer the next helpful step.\n"
+            "- If this is a question or request: answer directly and clearly without rambling.\n"
+            "- Do not invent facts beyond the prompt or memory.\n"
+            "- Avoid robotic openers such as 'You said that...' or copying the user's sentence back.\n\n"
             f"Conversation mode: {conversation_mode}\n"
-            f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
-            f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
+            f"Normalized prompt: {context.normalized_prompt}\n"
+            f"Recent memory:\n{context.recent_memory or '- none'}\n"
             f"Task: {task_description}"
         )
-        return await self._generate(prompt)
+        return await self._generate(self._with_language_policy(prompt, context))
 
 
 class PlanningSkill(BaseLLMSkill):
@@ -1135,12 +1172,12 @@ class PlanningSkill(BaseLLMSkill):
     async def execute(self, context: SkillContext) -> SkillResult:
         task_description = str(context.input.get("description", ""))
         prompt = (
-            "Bạn là PlanningSkill. Tạo checklist có thứ tự ưu tiên, rõ ràng, súc tích bằng tiếng Việt.\n\n"
+            "Bạn là PlanningSkill. Tạo checklist có thứ tự ưu tiên, rõ ràng, súc tích bằng ngôn ngữ phản hồi được yêu cầu.\n\n"
             f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
             f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
             f"Task: {task_description}"
         )
-        return await self._generate(prompt)
+        return await self._generate(self._with_language_policy(prompt, context))
 
 
 class CompareSkill(BaseLLMSkill):
@@ -1161,26 +1198,26 @@ class CompareSkill(BaseLLMSkill):
 
     def can_handle(self, input_data: dict[str, object]) -> bool:
         text = str(input_data.get("description", "")).lower()
-        return any(token in text for token in ("so sánh", "compare", "khác nhau", "ưu nhược"))
+        return any(token in text for token in ("compare", "difference", "trade-off", "pros and cons"))
 
     async def execute(self, context: SkillContext) -> SkillResult:
         task_description = str(context.input.get("description", ""))
         deps_text = format_dependency_outputs(context.dependency_outputs)
         prompt = (
-            "Bạn là CompareSkill. So sánh rõ ràng, có tiêu chí, ngắn gọn bằng tiếng Việt.\n\n"
-            f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
-            f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
+            "You are CompareSkill. Compare the options clearly with explicit criteria and concise trade-offs.\n\n"
+            f"Normalized prompt: {context.normalized_prompt}\n"
+            f"Recent memory:\n{context.recent_memory or '- none'}\n"
             f"Task: {task_description}\n"
             f"Dependency outputs:\n{deps_text or '- none'}"
         )
-        return await self._generate(prompt)
+        return await self._generate(self._with_language_policy(prompt, context))
 
 
 class CodeExampleSkill(BaseLLMSkill):
     metadata = SkillMetadata(
         name="code_example",
         description="Generate minimal, correct code examples or snippets based on context.",
-        examples=["ví dụ code", "code example", "snippet", "mã mẫu"],
+        examples=["code example", "snippet", "sample code", "minimal example"],
         priority_weight=0.16,
         input_schema={
             "type": "object",
@@ -1194,19 +1231,19 @@ class CodeExampleSkill(BaseLLMSkill):
 
     def can_handle(self, input_data: dict[str, object]) -> bool:
         text = str(input_data.get("description", "")).lower()
-        return any(token in text for token in ("ví dụ code", "code", "snippet", "mã"))
+        return any(token in text for token in ("code", "snippet", "sample", "example"))
 
     async def execute(self, context: SkillContext) -> SkillResult:
         task_description = str(context.input.get("description", ""))
         deps_text = format_dependency_outputs(context.dependency_outputs)
         prompt = (
-            "Bạn là CodeExampleSkill. Tạo ví dụ code ngắn, đúng cú pháp, dễ hiểu. Nếu cần, giải thích ngắn sau code.\n\n"
-            f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
-            f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
+            "You are CodeExampleSkill. Create a short, correct, easy-to-understand code example. Add a brief explanation after the code only when needed.\n\n"
+            f"Normalized prompt: {context.normalized_prompt}\n"
+            f"Recent memory:\n{context.recent_memory or '- none'}\n"
             f"Task: {task_description}\n"
             f"Dependency outputs:\n{deps_text or '- none'}"
         )
-        return await self._generate(prompt)
+        return await self._generate(self._with_language_policy(prompt, context))
 
 
 class SynthesizerSkill(BaseLLMSkill):
@@ -1225,34 +1262,459 @@ class SynthesizerSkill(BaseLLMSkill):
         },
     )
 
+    _LLM_EXTRACTION_TIMEOUT_SECONDS = 3.5
+    _LLM_EXTRACTION_CB_THRESHOLD = 3
+    _LLM_EXTRACTION_CB_COOLDOWN_SECONDS = 90.0
+    _LLM_EXTRACTION_FAILURE_STREAK = 0
+    _LLM_EXTRACTION_BLOCK_UNTIL = 0.0
+
     def can_handle(self, input_data: dict[str, object]) -> bool:
         _ = input_data
         return True
 
     @staticmethod
     def _is_insufficient_summary(text: str) -> bool:
+        """
+        Enhanced check for insufficient research summary.
+        
+        Detects:
+        - Explicit insufficiency markers (not found, limited results, etc.)
+        - Content too short (less than 15 words)
+        - Low semantic density (too many filler words)
+        - Outdated data (if markers present)
+        
+        Confidence penalty formula:
+        - Base penalty: 0.25 (for 1 weak summary)
+        - Per additional weak: +0.12
+        - Max penalty: 0.65
+        """
+        if not text or not isinstance(text, str):
+            return True
+        
         lowered = text.lower()
-        insufficiency_hints = (
+        stripped = text.strip()
+        
+        # Check 1: Explicit insufficiency markers
+        insufficiency_markers = (
             "khong du",
             "không đủ",
             "chua co du",
             "chưa có đủ",
             "insufficient",
-            "not enough data",
+            "not enough",
             "no enough data",
+            "lacking data",
             "khong co du lieu",
             "không có dữ liệu",
+            "khong tim thay",
+            "không tìm thấy",
+            "not found",
+            "no results",
+            "no results found",
+            "limited results",
             "gioi han",
             "giới hạn",
+            "tieu du",
+            "tiếu đủ",
+            "chi tinh",
+            "chỉ tính",
+            "briefly",
+            "briefly cover",
         )
-        return any(token in lowered for token in insufficiency_hints)
+        
+        if any(marker in lowered for marker in insufficiency_markers):
+            return True
+        
+        # Check 2: Content too short (minimum 15 words)
+        word_count = len(stripped.split())
+        if word_count < 15:
+            return True
+        
+        # Check 3: Semantic density - too many filler words (>40% filler)
+        filler_words = {
+            "the", "a", "an", "is", "are", "was", "were",
+            "be", "been", "being", "have", "has", "had",
+            "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "can", "could",
+            "and", "or", "but", "at", "in", "on", "to",
+            "for", "of", "with", "by", "from", "as",
+            "la", "le", "de", "da", "va", "se",  # French
+            "của", "và", "là", "được", "có", "trong", "ở", "tại",  # Vietnamese
+        }
+        
+        words = stripped.lower().split()
+        filler_count = sum(1 for w in words if w.strip('.,!?;:') in filler_words)
+        filler_ratio = filler_count / max(word_count, 1)
+        
+        if filler_ratio > 0.5:  # More than 50% filler words
+            return True
+        
+        # Check 4: Vague placeholder text patterns
+        vague_patterns = [
+            r"^(more|additional|further|other)\s+(information|details|data)",
+            r"(coming soon|stay tuned|watch for|check back)",
+            r"(not\s+(yet\s+)?available|unavailable|pending)",
+            r"^(to\s+be\s+(determined|announced|confirmed))",
+            r"(as\s+of|currently|presently)\s+(no\s+data|no\s+results|unknown)",
+        ]
+        
+        for pattern in vague_patterns:
+            if re.search(pattern, lowered):
+                return True
+        
+        # Check 5: Extremely generic summary (< 8 unique meaningful words)
+        meaningful_words = [w.strip('.,!?;:') for w in words 
+                           if len(w) > 3 and w.strip('.,!?;:') not in filler_words]
+        unique_meaningful = len(set(meaningful_words))
+        
+        if unique_meaningful < 8:
+            return True
+        
+        # If it passes all checks, consider it sufficient
+        return False
+
+    _LOCAL_CANDIDATE_STOPWORDS = {
+        "the",
+        "this",
+        "that",
+        "best",
+        "top",
+        "tokyo",
+        "milan",
+        "hanoi",
+        "danang",
+        "da nang",
+        "restaurant",
+        "restaurants",
+        "hotel",
+        "hotels",
+        "review",
+        "reviews",
+        "guide",
+        "travel",
+    }
+    _GENERIC_CANDIDATE_PREFIXES = (
+        "search",
+        "best ",
+        "top ",
+        "guide",
+        "review",
+        "reviews",
+        "article",
+        "list of",
+        "things to do",
+    )
+
+    @classmethod
+    def _normalize_candidate_name(cls, raw: str) -> str:
+        value = re.sub(r"\s+", " ", raw).strip(" \t\r\n,.;:!?\"'`()[]{}")
+        value = re.sub(r"^[\-–—•*]+\s*", "", value)
+        return value
+
+    @classmethod
+    def _looks_like_place_candidate(cls, raw: str) -> bool:
+        candidate = cls._normalize_candidate_name(raw)
+        if len(candidate) < 2 or len(candidate) > 80:
+            return False
+        lowered = candidate.lower()
+        if lowered in cls._LOCAL_CANDIDATE_STOPWORDS:
+            return False
+        if any(lowered.startswith(prefix) for prefix in cls._GENERIC_CANDIDATE_PREFIXES):
+            return False
+        if lowered.isdigit():
+            return False
+        token_count = len(candidate.split())
+        if token_count > 6:
+            return False
+        if token_count == 1 and candidate[:1].islower():
+            return False
+        return True
+
+    @classmethod
+    def _build_grounded_text_blocks(cls, local_payload: ResearchResultEnvelopeModel) -> list[str]:
+        blocks: list[str] = []
+        for idx, source in enumerate(local_payload.sources[:6], start=1):
+            snippet = source.snippet.strip().replace("\n", " ")
+            if len(snippet) > 420:
+                snippet = snippet[:420].rstrip() + "..."
+            if snippet:
+                blocks.append(f"[{idx}] Snippet: {snippet}")
+
+        for idx, evidence in enumerate(local_payload.evidence[:8], start=1):
+            content = evidence.content.strip().replace("\n", " ")
+            if len(content) > 240:
+                content = content[:240].rstrip() + "..."
+            if content:
+                blocks.append(f"[E{idx}] Evidence: {content}")
+        return blocks
+
+    @classmethod
+    def _find_best_evidence_span(cls, candidate: str, local_payload: ResearchResultEnvelopeModel) -> str:
+        lowered_candidate = candidate.lower()
+        best_span = ""
+        best_score = -1
+
+        for source in local_payload.sources:
+            text = source.snippet.strip()
+            if lowered_candidate not in text.lower():
+                continue
+            score = cls._mentions_in_text(candidate, text)
+            if score > best_score:
+                best_score = score
+                best_span = text[:220]
+
+        for evidence in local_payload.evidence:
+            text = evidence.content.strip()
+            if lowered_candidate not in text.lower():
+                continue
+            score = cls._mentions_in_text(candidate, text) + 1
+            if score > best_score:
+                best_score = score
+                best_span = text[:220]
+
+        return best_span
+
+    @classmethod
+    def _extract_candidates_from_text(cls, text: str) -> list[str]:
+        candidates: list[str] = []
+
+        for pattern in (r'"([^"\n]{2,80})"', r"'([^'\n]{2,80})'"):
+            for match in re.finditer(pattern, text):
+                candidate = cls._normalize_candidate_name(match.group(1))
+                if cls._looks_like_place_candidate(candidate):
+                    candidates.append(candidate)
+
+        for match in re.finditer(r"\b([A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*){0,4})\b", text):
+            candidate = cls._normalize_candidate_name(match.group(1))
+            if cls._looks_like_place_candidate(candidate):
+                candidates.append(candidate)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        return deduped
+
+    @classmethod
+    def _extract_fallback_places_from_local_search(cls, local_raw: object) -> list[str]:
+        payload = parse_research_result(local_raw)
+        if payload is None:
+            return []
+
+        candidates: list[str] = []
+        for source in payload.sources:
+            if cls._looks_like_place_candidate(source.title):
+                candidates.append(cls._normalize_candidate_name(source.title))
+            candidates.extend(cls._extract_candidates_from_text(source.snippet))
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+            if len(deduped) >= 8:
+                break
+        return deduped
+
+    @classmethod
+    def _extract_grounded_fallback_places(cls, local_payload: ResearchResultEnvelopeModel) -> list[str]:
+        candidates: list[str] = []
+        for block in cls._build_grounded_text_blocks(local_payload):
+            _, _, content = block.partition(":")
+            candidates.extend(cls._extract_candidates_from_text(content.strip()))
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+            if len(deduped) >= 8:
+                break
+        return deduped
+
+    @staticmethod
+    def _extract_json_object(raw_text: str) -> dict[str, Any] | None:
+        text = raw_text.strip()
+        if not text:
+            return None
+
+        candidates = [text]
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace >= 0 and last_brace > first_brace:
+            candidates.append(text[first_brace:last_brace + 1])
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _mentions_in_text(cls, candidate: str, haystack: str) -> int:
+        pattern = re.compile(rf"\b{re.escape(candidate.lower())}\b")
+        return len(pattern.findall(haystack.lower()))
+
+    @classmethod
+    def _record_llm_extraction_success(cls) -> None:
+        cls._LLM_EXTRACTION_FAILURE_STREAK = 0
+        cls._LLM_EXTRACTION_BLOCK_UNTIL = 0.0
+
+    @classmethod
+    def _record_llm_extraction_failure(cls) -> None:
+        cls._LLM_EXTRACTION_FAILURE_STREAK += 1
+        if cls._LLM_EXTRACTION_FAILURE_STREAK >= cls._LLM_EXTRACTION_CB_THRESHOLD:
+            cls._LLM_EXTRACTION_BLOCK_UNTIL = time.monotonic() + cls._LLM_EXTRACTION_CB_COOLDOWN_SECONDS
+
+    async def _generate_with_timeout(self, prompt: str, timeout_seconds: float) -> SkillResult:
+        try:
+            return await asyncio.wait_for(self._generate(prompt), timeout=timeout_seconds)
+        except TimeoutError:
+            return SkillResult(
+                success=False,
+                error="llm_extraction_timeout",
+                metadata={"error_type": "transient"},
+            )
+
+    @staticmethod
+    def _extract_entities_list(parsed: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(parsed, dict):
+            return []
+        entities = parsed.get("entities")
+        if not isinstance(entities, list):
+            return []
+        return [item for item in entities if isinstance(item, dict)]
+
+    async def _extract_candidates_with_llm(
+        self,
+        local_payload: ResearchResultEnvelopeModel | None,
+    ) -> tuple[list[str], bool, int, bool, str]:
+        if local_payload is None or not local_payload.sources:
+            return [], False, 0, False, "no_research_payload"
+
+        if time.monotonic() < self._LLM_EXTRACTION_BLOCK_UNTIL:
+            return [], False, 0, True, "circuit_open"
+
+        source_chunks = self._build_grounded_text_blocks(local_payload)
+
+        prompt = (
+            "Extract candidate place entities from the provided text snippets.\n"
+            "Rules:\n"
+            "- Only extract entities explicitly mentioned in the snippets or evidence spans.\n"
+            "- Do not invent new entities.\n"
+            "- Prefer proper-noun, multi-word place names when available.\n"
+            "- Ignore article titles and generic phrases like Search, Best restaurants, Top places, guide.\n"
+            "- Return only specific real-world place names.\n"
+            "Return STRICT JSON with this shape only:\n"
+            "{\"entities\":[{\"name\":\"...\",\"type\":\"place\",\"confidence\":0.0,\"evidence\":\"exact text span\"}]}\n\n"
+            f"Snippets:\n{chr(10).join(source_chunks)}"
+        )
+
+        attempts = 0
+        extraction = await self._generate_with_timeout(prompt, self._LLM_EXTRACTION_TIMEOUT_SECONDS)
+        attempts += 1
+        if not extraction.success:
+            self._record_llm_extraction_failure()
+            return [], False, attempts, False, "initial_call_failed"
+
+        raw_output = extract_result_text(extraction.data)
+        parsed = self._extract_json_object(raw_output)
+        entities = self._extract_entities_list(parsed)
+        used_retry = False
+
+        if not entities:
+            used_retry = True
+            retry_prompt = (
+                "Reformat the previous extraction into STRICT JSON only.\n"
+                "Do not add explanations, markdown, or extra keys.\n"
+                "Required shape:\n"
+                "{\"entities\":[{\"name\":\"...\",\"type\":\"place\",\"confidence\":0.0}]}\n"
+                "If no valid entity exists, return {\"entities\":[]}.\n\n"
+                f"Previous output:\n{raw_output}"
+            )
+            retry = await self._generate_with_timeout(retry_prompt, self._LLM_EXTRACTION_TIMEOUT_SECONDS)
+            attempts += 1
+            if retry.success:
+                retry_raw = extract_result_text(retry.data)
+                entities = self._extract_entities_list(self._extract_json_object(retry_raw))
+
+        if not entities:
+            self._record_llm_extraction_failure()
+            return [], used_retry, attempts, False, "invalid_extraction_output"
+
+        source_haystack = "\n".join(self._build_grounded_text_blocks(local_payload))
+        scored: list[tuple[float, str]] = []
+
+        for item in entities:
+            if not isinstance(item, dict):
+                continue
+            raw_name = str(item.get("name", "") or "")
+            candidate = self._normalize_candidate_name(raw_name)
+            if not self._looks_like_place_candidate(candidate):
+                continue
+            mention_count = self._mentions_in_text(candidate, source_haystack)
+            if mention_count <= 0:
+                continue
+
+            raw_confidence = item.get("confidence", 0.0)
+            try:
+                llm_confidence = max(0.0, min(1.0, float(raw_confidence)))
+            except Exception:
+                llm_confidence = 0.0
+
+            length_score = min(len(candidate) / 24.0, 1.0)
+            token_bonus = 1.0 if len(candidate.split()) >= 2 else 0.6
+            score = (
+                mention_count * 0.5
+                + length_score * 0.2
+                + token_bonus * 0.2
+                + llm_confidence * 0.1
+            )
+            scored.append((score, candidate))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for _, candidate in scored:
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+            if len(deduped) >= 8:
+                break
+        self._record_llm_extraction_success()
+        return deduped, used_retry, attempts, False, "ok"
+
+    @staticmethod
+    def _count_independent_sources(research_payloads: list[ResearchResultEnvelopeModel]) -> int:
+        domains: set[str] = set()
+        for payload in research_payloads:
+            for source in payload.sources:
+                domain = urlparse(source.url).netloc.strip().lower()
+                if domain:
+                    domains.add(domain)
+        return len(domains)
 
     async def execute(self, context: SkillContext) -> SkillResult:
         deps_text = format_dependency_outputs(context.dependency_outputs)
         synthesis_task = str(context.input.get("description", "")).strip().lower()
         local_or_travel_synthesis = any(
             token in synthesis_task
-            for token in ("verified local place", "local place", "travel", "itinerary", "địa điểm", "du lịch", "lich trinh")
+            for token in ("verified local place", "local place", "travel", "itinerary")
         )
         research_payloads = [
             payload for payload in (parse_research_result(value) for value in context.dependency_outputs.values()) if payload is not None
@@ -1261,19 +1723,19 @@ class SynthesizerSkill(BaseLLMSkill):
             payload for payload in (parse_analysis_result(value) for value in context.dependency_outputs.values()) if payload is not None
         ]
 
-        if local_or_travel_synthesis and not research_payloads:
-            return SkillResult(success=False, error="no_dependency_evidence", metadata={"error_type": "permanent"})
+        if local_or_travel_synthesis:
+            return await self._synthesize_local_discovery(context, research_payloads, deps_text)
 
         if not context.dependency_outputs and not research_payloads and not analysis_payloads:
             # Fallback to pure knowledge answer when synthesis is invoked without evidence.
             fallback_prompt = (
-                "Bạn là SynthesizerSkill. Không có kết quả phụ thuộc/evidence từ tool. "
-                "Hãy trả lời bằng kiến thức tổng quát sẵn có, ngắn gọn, trung thực bằng tiếng Việt. "
-                "Nếu có điểm không chắc chắn, nêu rõ giới hạn thay vì khẳng định tuyệt đối.\n\n"
-                f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
+                "You are SynthesizerSkill. No dependency output or tool evidence is available. "
+                "Answer with concise, honest general knowledge in English. "
+                "If anything is uncertain, state the limitation instead of overclaiming.\n\n"
+                f"Normalized prompt: {context.normalized_prompt}\n"
                 f"Task: {str(context.input.get('description', '')).strip() or context.normalized_prompt}"
             )
-            fallback_result = await self._generate(fallback_prompt)
+            fallback_result = await self._generate(self._with_language_policy(fallback_prompt, context))
             if fallback_result.success:
                 fallback_result.metadata = {
                     **(fallback_result.metadata or {}),
@@ -1298,22 +1760,53 @@ class SynthesizerSkill(BaseLLMSkill):
         ]
 
         if context.dependency_outputs and not research_payloads and not analysis_payloads and failed_steps and len(failed_steps) == len(context.dependency_outputs):
+            if is_weather_text(context.normalized_prompt):
+                return SkillResult(
+                    success=False,
+                    error="insufficient_live_evidence",
+                    metadata={
+                        "provider": "synthesizer",
+                        "source_count": 0,
+                        "citation_count": 0,
+                        "citations": "none",
+                        "freshness": "n/a",
+                        "fallback_used": False,
+                        "confidence": 0.0,
+                        "intent": "weather_hard_fail",
+                        "providers_tried": "dependency_outputs",
+                        "cache_ttl_seconds": 0,
+                        "used_tool": "none",
+                        "failed_steps": ",".join(failed_steps),
+                        "error_type": "permanent",
+                    },
+                )
+
             degraded_prompt = (
-                "Ban la SynthesizerSkill trong che do degraded. Toan bo dependency outputs khong thu duoc evidence live hop le. "
-                "Hay tra loi ngan gon dua tren thong tin co ban, khong khang dinh tuyet doi, va neu ro can xac minh them.\n\n"
-                f"Prompt chuan hoa: {context.normalized_prompt}\n"
+                "You are SynthesizerSkill in degraded mode. All dependency outputs failed to provide valid live evidence. "
+                "Answer briefly from basic information only, do not overclaim, and state that more verification is needed.\n\n"
+                f"Normalized prompt: {context.normalized_prompt}\n"
                 f"Task: {str(context.input.get('description', '')).strip() or context.normalized_prompt}"
             )
-            degraded = await self._generate(degraded_prompt)
+            degraded = await self._generate(self._with_language_policy(degraded_prompt, context))
             if not degraded.success:
                 return degraded
 
-            degraded_answer = extract_result_text(degraded.data).strip() or "Khong du evidence live; day la cau tra loi tam thoi."
-            degraded_answer = (
-                "Tuyen bo trach nhiem: khong du du lieu dang tin cay tu cac nguon live, cau tra loi duoi day chi dua tren thong tin co ban. "
-                "Ban can xac minh lai truoc khi su dung cho cac muc dich khac.\n\n"
-                f"{degraded_answer}"
+            degraded_answer = extract_result_text(degraded.data).strip() or self._fallback_text(
+                context,
+                english="There is not enough live evidence. This is a temporary best-effort answer.",
+                vietnamese="There is not enough live evidence. This is a temporary best-effort answer.",
             )
+            degraded_answer = self._fallback_text(
+                context,
+                english=(
+                    "Disclaimer: there is not enough reliable live evidence, so the answer below is based only on general information. "
+                    "Please verify it before using it for other purposes.\n\n"
+                ),
+                vietnamese=(
+                    "Disclaimer: there is not enough reliable live evidence, so the answer below is based only on general information. "
+                    "Please verify it before using it for other purposes.\n\n"
+                ),
+            ) + degraded_answer
             return SkillResult(
                 success=True,
                 data=degraded_answer,
@@ -1350,18 +1843,17 @@ class SynthesizerSkill(BaseLLMSkill):
             ]
         )
         prompt = (
-            "Bạn là SynthesizerSkill. Hãy hợp nhất các kết quả trung gian thành 1 câu trả lời cuối cùng, "
-            "mạch lạc, không lặp ý, bằng tiếng Việt. Nếu có dữ kiện từ research, chỉ dùng các dữ kiện có trong evidence đã dẫn nguồn. "
-            "BẮT BUỘC: không được tự thêm fact ngoài evidence; khi có mâu thuẫn giữa các nguồn, phải nêu rõ xung đột và mức độ chắc chắn. "
-            "BẮT BUỘC: giữ hoặc bổ sung phần Nguon tham khao với URL đã có. "
-            "BẮT BUỘC: có mục 'Dan chung da su dung' và mỗi ý phải kèm URL nguồn tương ứng.\n\n"
-            f"Prompt chuẩn hóa: {context.normalized_prompt}\n"
-            f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
+            "You are SynthesizerSkill. Merge the intermediate results into one coherent final answer in English. "
+            "If research evidence exists, use only facts that are explicitly supported by cited evidence. "
+            "Do not add new facts beyond the evidence. When sources conflict, state the conflict and the confidence level clearly. "
+            "Keep or add a References section with source URLs, and include an Evidence used section where each point is tied to a source URL when possible.\n\n"
+            f"Normalized prompt: {context.normalized_prompt}\n"
+            f"Recent memory:\n{context.recent_memory or '- none'}\n"
             f"Dependency outputs:\n{deps_text or '- none'}\n"
             f"Research evidence:\n{evidence_block or '- none'}\n"
             f"Analysis evidence:\n{analysis_block or '- none'}"
         )
-        result = await self._generate(prompt)
+        result = await self._generate(self._with_language_policy(prompt, context))
         if not result.success:
             return result
 
@@ -1370,7 +1862,7 @@ class SynthesizerSkill(BaseLLMSkill):
             sources = [source for payload in research_payloads for source in payload.sources]
             source_block = format_sources_for_user(sources)
             if source_block and source_block not in answer_text:
-                answer_text = f"{answer_text}\n\nNguon tham khao:\n{source_block}"
+                answer_text = f"{answer_text}\n\nReferences:\n{source_block}"
             unique_urls: list[str] = []
             for source in sources:
                 if source.url not in unique_urls:
@@ -1380,11 +1872,17 @@ class SynthesizerSkill(BaseLLMSkill):
             if insufficient_count > 0:
                 insufficient_penalty = min(0.25 + insufficient_count * 0.12, 0.65)
                 avg_confidence = max(0.15, avg_confidence - insufficient_penalty)
-                answer_text = (
-                    "Luu y: bo evidence hien tai con thieu du lieu truc tiep cho mot so khia canh, "
-                    "vi vay muc do chac chan da duoc giam de tranh ket luan qua muc.\n\n"
-                    f"{answer_text}"
-                )
+                answer_text = self._fallback_text(
+                    context,
+                    english=(
+                        "Note: the current evidence is still missing direct support for some aspects, "
+                        "so the confidence level was reduced to avoid overclaiming.\n\n"
+                    ),
+                    vietnamese=(
+                        "Note: the current evidence is still missing direct support for some aspects, "
+                        "so the confidence level was reduced to avoid overclaiming.\n\n"
+                    ),
+                ) + answer_text
             freshness = sources[0].freshness if sources else "n/a"
             result.metadata = {
                 **(result.metadata or {}),
@@ -1414,7 +1912,7 @@ class SynthesizerSkill(BaseLLMSkill):
 
             if max_conflicts > 0 or avg_confidence < 0.45:
                 answer_text = (
-                    "Luu y: cac ket luan duoi day co tinh chat tam thoi do evidence con xung dot hoac do tin cay chua cao.\n\n"
+                    "Disclaimer: the conclusions below are provisional because the evidence is still conflicting or has low reliability.\n\n"
                     f"{answer_text}"
                 )
 
@@ -1450,6 +1948,194 @@ class SynthesizerSkill(BaseLLMSkill):
                 "used_tool": "none",
             }
         result.data = answer_text
+        return result
+
+    async def _synthesize_local_discovery(
+        self,
+        context: SkillContext,
+        research_payloads: list[ResearchResultEnvelopeModel],
+        deps_text: str,
+    ) -> SkillResult:
+        """Handle synthesis for local_discovery and travel_planning pipelines.
+
+        Accepts evidence in any format: ResearchResultEnvelope, PlaceVerification
+        plain dicts, ReviewConsensus plain dicts, or ERROR strings from failed nodes.
+        Always produces a useful answer — never returns a hard failure to the user.
+        """
+        place_verify_raw = context.dependency_outputs.get("place-verify")
+        candidate_extract_raw = context.dependency_outputs.get("candidate-extract")
+        verified_places: list[dict[str, object]] = []
+        if isinstance(place_verify_raw, dict):
+            raw_verified_places = place_verify_raw.get("verified_places")
+            if isinstance(raw_verified_places, list):
+                verified_places = [item for item in raw_verified_places if isinstance(item, dict)]
+
+        extracted_candidates: list[dict[str, object]] = []
+        if isinstance(candidate_extract_raw, dict):
+            raw_candidates = candidate_extract_raw.get("candidates")
+            if isinstance(raw_candidates, list):
+                extracted_candidates = [item for item in raw_candidates if isinstance(item, dict)]
+
+        has_verified_places = bool(verified_places)
+        has_structured_candidates = bool(extracted_candidates)
+        local_payload = parse_research_result(context.dependency_outputs.get("local-search"))
+
+        if has_structured_candidates:
+            fallback_candidates = [
+                str(item.get("name", "")).strip()
+                for item in extracted_candidates
+                if str(item.get("name", "")).strip()
+            ][:8]
+            llm_candidates: list[str] = []
+            llm_retry_used = False
+            llm_attempts = 0
+            llm_skipped = True
+            llm_skip_reason = "candidate_node_available"
+        else:
+            llm_candidates, llm_retry_used, llm_attempts, llm_skipped, llm_skip_reason = await self._extract_candidates_with_llm(local_payload)
+            heuristic_candidates = self._extract_fallback_places_from_local_search(context.dependency_outputs.get("local-search"))
+            fallback_candidates = []
+            seen_candidates: set[str] = set()
+            for candidate in llm_candidates + heuristic_candidates:
+                key = candidate.lower()
+                if key in seen_candidates:
+                    continue
+                seen_candidates.add(key)
+                fallback_candidates.append(candidate)
+                if len(fallback_candidates) >= 8:
+                    break
+
+        # Collect useful content from all dependency outputs regardless of format.
+        # PlaceVerificationSkill and ReviewConsensusSkill emit plain dicts with a
+        # 'summary' key — extract_result_text handles these correctly.
+        useful_parts: list[str] = []
+        for key, val in context.dependency_outputs.items():
+            text = extract_result_text(val).strip()
+            if text and not text.startswith("ERROR:"):
+                useful_parts.append(f"[{key}]\n{text}")
+
+        has_evidence = bool(useful_parts) or bool(research_payloads) or bool(fallback_candidates)
+
+        evidence_block = "\n\n".join(useful_parts) if useful_parts else ""
+        research_block = "\n\n".join(
+            f"Research sources:\n{format_sources_for_user(p.sources)}\nSummary: {p.summary}"
+            for p in research_payloads
+        ) if research_payloads else ""
+        extracted_candidates_block = ""
+        if extracted_candidates:
+            extracted_candidates_block = "\n".join(
+                f"- {item.get('name', 'unknown')} | type={item.get('type', 'place')} | "
+                f"location={item.get('location', 'unspecified')} | confidence={item.get('confidence', 0.0)}"
+                for item in extracted_candidates[:6]
+            )
+        fallback_candidates_block = ""
+        if fallback_candidates and not has_verified_places:
+            fallback_candidates_block = "\n".join(f"- {item}" for item in fallback_candidates)
+
+        # Extract location from geo-intent if available in this synthesizer's dependency outputs.
+        geo_raw_s = context.dependency_outputs.get("geo-intent")
+        target_location_s = ""
+        if isinstance(geo_raw_s, dict):
+            geo_data_s = geo_raw_s.get("geo_intent", {})
+            if isinstance(geo_data_s, dict):
+                target_location_s = str(geo_data_s.get("location", "")).strip()
+        location_rule = (
+            f"- VỊ TRÍ BẮT BUỘC: Chỉ gợi ý địa điểm thực sự ở {target_location_s}. "
+            "Nếu tên địa điểm hoặc mô tả gợi ý vị trí khác (thành phố/quốc gia khác), LOẠI BỎ ngay lập tức.\n"
+        ) if target_location_s else ""
+
+        if has_evidence:
+            combined_evidence = "\n\n".join(filter(None, [evidence_block, research_block]))
+            prompt = (
+                "You are SynthesizerSkill. Turn the pipeline outputs into practical place recommendations for the user.\n"
+                "Mandatory rules:\n"
+                f"{location_rule}"
+                "- Present at least 3 specific suggestions from the available data\n"
+                "- Use a clear format: place name plus a short reason\n"
+                "- If the evidence is incomplete, add a short confidence note\n"
+                "- Never answer with 'cannot verify' or similar refusals\n\n"
+                f"User request: {context.normalized_prompt}\n\n"
+                f"Pipeline data:\n{combined_evidence or deps_text or '- none'}\n"
+                f"Extracted structured candidates:\n{extracted_candidates_block or '- none'}\n"
+                f"Fallback candidate list when place verification is empty:\n{fallback_candidates_block or '- none'}\n"
+            )
+            confidence_base = 0.55 if research_payloads else 0.42
+        else:
+            # All upstream nodes failed (e.g. SerpAPI key missing, no places found).
+            # Still provide best-effort from LLM knowledge with explicit disclaimer.
+            prompt = (
+                "You are a helpful assistant. The live place-search pipeline has no verified data for this request.\n"
+                "Provide best-effort suggestions from general knowledge with these constraints:\n"
+                "- Give at least 3 to 5 specific suggestions with short reasons\n"
+                "- Do not refuse or say there is no information\n"
+                "- Keep the answer practical and concise in English\n\n"
+                f"Request: {context.normalized_prompt}"
+            )
+            confidence_base = 0.30
+
+        result = await self._generate(self._with_language_policy(prompt, context))
+        if not result.success:
+            return result
+
+        answer = extract_result_text(result.data).strip()
+        if not has_evidence:
+            answer = self._fallback_text(
+                context,
+                english="Warning: the suggestions below are based on general knowledge and have not been verified against live sources.\n\n",
+                vietnamese="Warning: the suggestions below are based on general knowledge and have not been verified against live sources.\n\n",
+            ) + answer
+
+        sources = [s for p in research_payloads for s in p.sources]
+        unique_urls = list({s.url for s in sources})
+        source_count = len(unique_urls) or len(useful_parts)
+        independent_source_count = self._count_independent_sources(research_payloads)
+
+        verification_status = "verified" if has_verified_places else "candidate_extracted" if has_structured_candidates else "unverified"
+        needs_followup = not has_verified_places or independent_source_count < 2
+        if has_verified_places:
+            confidence_label = "high"
+        elif has_structured_candidates and independent_source_count >= 1:
+            confidence_label = "medium"
+        elif independent_source_count >= 2:
+            confidence_label = "medium"
+        else:
+            confidence_label = "low"
+
+        if needs_followup and not answer.lower().startswith(("warning:", "disclaimer:", "note:")):
+            answer = (
+                "Warning: part of the suggestions below remains provisional because the place-verification layer is not yet complete. "
+                "Please confirm opening hours and availability before deciding.\n\n"
+                f"{answer}"
+            )
+
+        result.data = answer
+        result.metadata = {
+            **(result.metadata or {}),
+            "provider": "synthesizer",
+            "source_count": source_count,
+            "citation_count": len(unique_urls),
+            "citations": ",".join(unique_urls) if unique_urls else "none",
+            "freshness": sources[0].freshness if sources else "n/a",
+            "fallback_used": not bool(research_payloads),
+            "confidence": round(min(0.85, confidence_base + min(source_count, 5) * 0.06), 2),
+            "confidence_label": confidence_label,
+            "verification_status": verification_status,
+            "needs_followup": needs_followup,
+            "independent_source_count": independent_source_count,
+            "fallback_place_count": len(fallback_candidates),
+            "structured_candidate_count": len(extracted_candidates),
+            "llm_extraction_used": llm_attempts > 0,
+            "llm_extraction_success": bool(llm_candidates),
+            "llm_extraction_retried": llm_retry_used,
+            "llm_extraction_attempts": llm_attempts,
+            "llm_candidate_count": len(llm_candidates),
+            "llm_extraction_skipped": llm_skipped,
+            "llm_extraction_skip_reason": llm_skip_reason,
+            "intent": "local_discovery",
+            "providers_tried": "dependency_outputs" if has_evidence else "llm_knowledge",
+            "cache_ttl_seconds": 0,
+            "used_tool": "none",
+        }
         return result
 
 
@@ -1531,25 +2217,29 @@ class FusionSkill(BaseLLMSkill):
             else ""
         )
         prompt = (
-            "Bạn là FusionSkill. Nhiệm vụ: tạo câu trả lời cuối cùng từ 2 nguồn đã thu thập song song.\n"
-            "Ưu tiên: nếu có evidence từ research (có nguồn cụ thể) → dùng làm nền tảng chính. "
-            "Nếu LLM direct answer bổ sung context hữu ích → tích hợp không lặp ý.\n"
-            "Không được thêm fact mới ngoài những gì đã có. Viết tự nhiên bằng tiếng Việt.\n\n"
-            f"Prompt gốc: {context.normalized_prompt}\n"
-            f"Memory gần đây:\n{context.recent_memory or '- none'}\n"
+            "You are FusionSkill. Create the final answer from two sources collected in parallel.\n"
+            "Priority: if research evidence with concrete sources exists, use it as the primary foundation. "
+            "If the direct LLM answer adds helpful context, integrate it without repeating points.\n"
+            "Do not add any new facts beyond what is already available. Write naturally in English.\n\n"
+            f"Original prompt: {context.normalized_prompt}\n"
+            f"Recent memory:\n{context.recent_memory or '- none'}\n"
             f"Decision: {decision}\n"
-            f"Nguồn chính:\n{primary_text or '- none'}"
+            f"Primary source:\n{primary_text or '- none'}"
             f"{blend_section}"
         )
-        result = await self._generate(prompt)
+        result = await self._generate(self._with_language_policy(prompt, context))
         if not result.success:
             return result
 
-        answer_text = extract_result_text(result.data).strip() or primary_text or "Không đủ evidence để trả lời."
+        answer_text = extract_result_text(result.data).strip() or primary_text or self._fallback_text(
+            context,
+            english="There is not enough evidence to answer reliably.",
+            vietnamese="Không đủ evidence để trả lời.",
+        )
         if sources:
             source_block = format_sources_for_user(sources)
             if source_block and source_block not in answer_text:
-                answer_text = f"{answer_text}\n\nNguồn tham khảo:\n{source_block}"
+                answer_text = f"{answer_text}\n\nReferences:\n{source_block}"
             unique_urls = list({s.url for s in sources})
         else:
             unique_urls = []
@@ -1593,12 +2283,13 @@ class GeoIntentSkill:
         r"(?:ở|o|at|in)\s+([A-Za-zÀ-ỹ\s]+)",
         r"(?:tại|tai)\s+([A-Za-zÀ-ỹ\s]+)",
         r"(?:gần|gan|near)\s+([A-Za-zÀ-ỹ\s]+)",
+        # Handles travel context: "business trip to Tokyo", "travel to Paris", "going to Berlin"
+        r"(?:trip|travel|journey|visit(?:ing)?|going)\s+to\s+([A-Za-zÀ-ỹ]+(?:\s[A-Za-zÀ-ỹ]+){0,2})",
     )
 
     _BUDGET_HINTS = (
         "rẻ",
-        "re",
-        "bình dân",
+        "bình dân",  # removed bare "re" — it substring-matches "restaurant"
         "binh dan",
         "cheap",
         "luxury",
@@ -1711,9 +2402,30 @@ class LocalDiscoverySkill(BaseLLMSkill):
             )
         )
 
+    @staticmethod
+    def _infer_place_type(text: str) -> str:
+        lowered = text.lower()
+        if any(t in lowered for t in ("restaurant", "nhà hàng", "nha hang", "quán ăn", "lunch", "dinner", "breakfast", "eat", "food", "dining", "ăn")):
+            return "restaurant"
+        if any(t in lowered for t in ("hotel", "khách sạn", "khach san", "resort", "homestay")):
+            return "hotel"
+        if any(t in lowered for t in ("attraction", "địa điểm", "dia diem", "things to do", "museum", "park")):
+            return "tourist attraction"
+        return "place"
+
     async def execute(self, context: SkillContext) -> SkillResult:
         query = str(context.input.get("description", "")).strip()
         started_at = time.perf_counter()
+
+        # Read location from geo-intent (runs before local-search in the DAG).
+        # Build a tightly location-scoped query so OSM / DDG return places in the right city.
+        geo_raw = context.dependency_outputs.get("geo-intent")
+        if isinstance(geo_raw, dict):
+            geo_data = geo_raw.get("geo_intent", {})
+            location = str(geo_data.get("location", "")).strip() if isinstance(geo_data, dict) else ""
+            if location:
+                place_type = self._infer_place_type(query)
+                query = f"{place_type} in {location}"
 
         batch: SearchResultBatch | None = None
         if context.selected_tool is not None:
@@ -1820,6 +2532,14 @@ class PlaceVerificationSkill:
                 return SkillResult(success=False, error="local_evidence_missing", metadata={"error_type": "permanent"})
             return SkillResult(success=False, error="local_evidence_missing", metadata={"error_type": "permanent"})
 
+        # Read target location from geo-intent (available when geo-intent is in depends_on).
+        geo_raw = context.dependency_outputs.get("geo-intent")
+        target_location = ""
+        if isinstance(geo_raw, dict):
+            geo_data = geo_raw.get("geo_intent", {})
+            if isinstance(geo_data, dict):
+                target_location = str(geo_data.get("location", "")).strip().lower()
+
         seen_titles: set[str] = set()
         verified: list[dict[str, object]] = []
         for source in local_payload.sources:
@@ -1827,6 +2547,21 @@ class PlaceVerificationSkill:
             if normalized_title in seen_titles:
                 continue
             seen_titles.add(normalized_title)
+            # Location guard: drop places whose ADDRESS doesn't mention the target city.
+            # Strip the place name from the snippet first to avoid false positives like
+            # "Tokyo In April" restaurant in Vancouver matching a Tokyo query.
+            # OSM snippet format: "osm_type: Place Name, address1, City, Country. Coordinates: ..."
+            if target_location:
+                snippet_lower = source.snippet.lower()
+                colon_pos = snippet_lower.find(":")
+                if colon_pos >= 0:
+                    after_colon = snippet_lower[colon_pos + 1:]
+                    comma_pos = after_colon.find(",")
+                    address_part = after_colon[comma_pos + 1:] if comma_pos >= 0 else after_colon
+                else:
+                    address_part = snippet_lower
+                if target_location not in address_part:
+                    continue
             verified.append(
                 {
                     "name": source.title,
@@ -1920,6 +2655,139 @@ class ReviewConsensusSkill:
         )
 
 
+class CandidateExtractionSkill(SynthesizerSkill):
+    metadata = SkillMetadata(
+        name="candidate_extraction",
+        description="Extract structured place candidates from local search evidence using guarded LLM parsing.",
+        examples=["extract restaurant candidates", "parse place entities", "candidate extraction"],
+        priority_weight=0.23,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "minLength": 1},
+            },
+            "required": ["description"],
+            "additionalProperties": True,
+        },
+    )
+
+    def can_handle(self, input_data: dict[str, object]) -> bool:
+        _ = input_data
+        return True
+
+    @staticmethod
+    def _infer_candidate_type(description: str) -> str:
+        return LocalDiscoverySkill._infer_place_type(description)
+
+    @classmethod
+    def _build_candidate_records(
+        cls,
+        candidate_names: list[str],
+        local_payload: ResearchResultEnvelopeModel,
+        description: str,
+        location: str,
+    ) -> list[dict[str, object]]:
+        records: list[dict[str, object]] = []
+        candidate_type = cls._infer_candidate_type(description)
+
+        for name in candidate_names:
+            evidence_sources: list[str] = []
+            mention_count = 0
+            for source in local_payload.sources:
+                haystack = f"{source.title}\n{source.snippet}"
+                mentions_here = cls._mentions_in_text(name, haystack)
+                if mentions_here <= 0:
+                    continue
+                mention_count += mentions_here
+                if source.url not in evidence_sources:
+                    evidence_sources.append(source.url)
+
+            if mention_count <= 0:
+                continue
+
+            source_support = min(len(evidence_sources) / 3.0, 1.0)
+            mention_support = min(mention_count / 3.0, 1.0)
+            confidence = round(min(0.95, 0.45 + source_support * 0.3 + mention_support * 0.2), 2)
+            evidence_span = cls._find_best_evidence_span(name, local_payload)
+            records.append(
+                {
+                    "name": name,
+                    "type": candidate_type,
+                    "location": location or "unspecified",
+                    "confidence": confidence,
+                    "evidence_sources": evidence_sources[:4],
+                    "evidence_span": evidence_span,
+                    "mention_count": mention_count,
+                }
+            )
+
+        return records[:6]
+
+    async def execute(self, context: SkillContext) -> SkillResult:
+        local_payload = parse_research_result(context.dependency_outputs.get("local-search"))
+        if local_payload is None or not local_payload.sources:
+            return SkillResult(success=False, error="local_evidence_missing", metadata={"error_type": "permanent"})
+
+        geo_raw = context.dependency_outputs.get("geo-intent")
+        target_location = ""
+        if isinstance(geo_raw, dict):
+            geo_data = geo_raw.get("geo_intent", {})
+            if isinstance(geo_data, dict):
+                target_location = str(geo_data.get("location", "") or "").strip()
+
+        llm_candidates, llm_retry_used, llm_attempts, llm_skipped, llm_skip_reason = await self._extract_candidates_with_llm(local_payload)
+        heuristic_candidates = self._extract_grounded_fallback_places(local_payload)
+
+        ordered_names: list[str] = []
+        seen: set[str] = set()
+        for candidate in llm_candidates + heuristic_candidates:
+            key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered_names.append(candidate)
+            if len(ordered_names) >= 8:
+                break
+
+        candidate_records = self._build_candidate_records(
+            ordered_names,
+            local_payload,
+            str(context.input.get("description", "") or context.normalized_prompt),
+            target_location,
+        )
+        if not candidate_records:
+            return SkillResult(success=False, error="no_candidate_entities", metadata={"error_type": "permanent"})
+
+        summary_lines = [
+            f"{idx + 1}. {item['name']} ({item['type']}, {item['location']}, confidence={item['confidence']})"
+            for idx, item in enumerate(candidate_records)
+        ]
+        summary = "Extracted place candidates:\n" + "\n".join(summary_lines)
+
+        return SkillResult(
+            success=True,
+            data={
+                "summary": summary,
+                "candidates": candidate_records,
+                "candidate_count": len(candidate_records),
+            },
+            metadata={
+                "provider": "candidate_extraction",
+                "source_count": len(candidate_records),
+                "candidate_count": len(candidate_records),
+                "confidence": round(sum(float(item["confidence"]) for item in candidate_records) / max(len(candidate_records), 1), 2),
+                "llm_extraction_used": llm_attempts > 0,
+                "llm_extraction_success": bool(llm_candidates),
+                "llm_extraction_retried": llm_retry_used,
+                "llm_extraction_attempts": llm_attempts,
+                "llm_candidate_count": len(llm_candidates),
+                "llm_extraction_skipped": llm_skipped,
+                "llm_extraction_skip_reason": llm_skip_reason,
+                "intent": "local_discovery",
+            },
+        )
+
+
 class ItineraryPlannerSkill(BaseLLMSkill):
     metadata = SkillMetadata(
         name="itinerary_planner",
@@ -1945,6 +2813,7 @@ class ItineraryPlannerSkill(BaseLLMSkill):
         geo_text = extract_result_text(context.dependency_outputs.get("geo-intent"))
         verified_payload = context.dependency_outputs.get("place-verify")
         verified_text = extract_result_text(verified_payload)
+        candidate_payload = context.dependency_outputs.get("candidate-extract")
 
         verified_places: list[dict[str, object]] = []
         if isinstance(verified_payload, dict):
@@ -1952,7 +2821,19 @@ class ItineraryPlannerSkill(BaseLLMSkill):
             if isinstance(raw_places, list):
                 verified_places = [item for item in raw_places if isinstance(item, dict)]
 
-        if not verified_places or str(verified_text).strip().startswith("ERROR:"):
+        extracted_candidates: list[dict[str, object]] = []
+        if isinstance(candidate_payload, dict):
+            raw_candidates = candidate_payload.get("candidates")
+            if isinstance(raw_candidates, list):
+                extracted_candidates = [item for item in raw_candidates if isinstance(item, dict)]
+
+        candidate_lines = [
+            f"- {item.get('name', 'unknown')} ({item.get('type', 'place')}, {item.get('location', 'unspecified')})"
+            for item in extracted_candidates[:6]
+        ]
+        candidate_text = "\n".join(candidate_lines)
+
+        if (not verified_places or str(verified_text).strip().startswith("ERROR:")) and not extracted_candidates:
             return SkillResult(
                 success=False,
                 error="no_verified_places_for_itinerary",
@@ -1960,18 +2841,23 @@ class ItineraryPlannerSkill(BaseLLMSkill):
             )
 
         llm_prompt = (
-            "Bạn là ItineraryPlannerSkill. Tạo lịch trình ngắn gọn, thực dụng, theo khung giờ sáng/chiều/tối. "
-            "Chỉ dùng địa điểm có trong evidence, không bịa thêm địa điểm mới. Ưu tiên tiếng Việt.\n\n"
-            f"Prompt người dùng: {prompt}\n"
+            "You are ItineraryPlannerSkill. Build a short, practical itinerary with morning, afternoon, and evening slots. "
+            "Only use places that appear in the evidence, and do not invent new places.\n\n"
+            f"User prompt: {prompt}\n"
             f"Geo constraints: {geo_text or '- none'}\n"
             f"Verified places:\n{verified_text or '- none'}\n"
+            f"Candidate places:\n{candidate_text or '- none'}\n"
         )
 
-        result = await self._generate(llm_prompt)
+        result = await self._generate(self._with_language_policy(llm_prompt, context))
         if not result.success:
             return result
 
-        itinerary = extract_result_text(result.data).strip() or "Chưa đủ dữ liệu để tạo lịch trình chi tiết."
+        itinerary = extract_result_text(result.data).strip() or self._fallback_text(
+            context,
+            english="There is not enough evidence to build a detailed itinerary yet.",
+            vietnamese="Chưa đủ dữ liệu để tạo lịch trình chi tiết.",
+        )
         return SkillResult(
             success=True,
             data={
@@ -1982,5 +2868,6 @@ class ItineraryPlannerSkill(BaseLLMSkill):
                 "provider": "itinerary_planner",
                 "confidence": 0.72,
                 "intent": "travel_planning",
+                "verification_status": "verified" if verified_places else "candidate_extracted",
             },
         )

@@ -41,10 +41,20 @@ class DAGExecutor:
         nodes: list[DAGNode],
         normalized_prompt: str,
         recent_memory_getter: Callable[[], str] | None = None,
+        response_language: str = "english",
+        detected_input_language: str = "english",
+        explicit_response_language: bool = False,
     ) -> tuple[dict[str, Any], list[dict[str, str]]]:
         results: dict[str, Any] = {}
         execution_trace: list[dict[str, str]] = []
-        async for update in self.execute_stream(nodes, normalized_prompt, recent_memory_getter=recent_memory_getter):
+        async for update in self.execute_stream(
+            nodes,
+            normalized_prompt,
+            recent_memory_getter=recent_memory_getter,
+            response_language=response_language,
+            detected_input_language=detected_input_language,
+            explicit_response_language=explicit_response_language,
+        ):
             result = update.result
             results[update.node.id] = (
                 result.data if result.success and result.data is not None else f"ERROR: {result.error or 'unknown error'}"
@@ -72,6 +82,9 @@ class DAGExecutor:
         nodes: list[DAGNode],
         normalized_prompt: str,
         recent_memory_getter: Callable[[], str] | None = None,
+        response_language: str = "english",
+        detected_input_language: str = "english",
+        explicit_response_language: bool = False,
     ) -> AsyncIterator[ExecutionUpdate]:
         results: dict[str, Any] = {}
         completed: set[str] = set()
@@ -100,6 +113,9 @@ class DAGExecutor:
                         results,
                         normalized_prompt,
                         current_memory(),
+                        response_language,
+                        detected_input_language,
+                        explicit_response_language,
                     )
                 )
                 in_flight[task] = node
@@ -127,6 +143,9 @@ class DAGExecutor:
         results: dict[str, Any],
         normalized_prompt: str,
         recent_memory: str,
+        response_language: str,
+        detected_input_language: str,
+        explicit_response_language: bool,
     ) -> tuple[DAGNode, SkillResult, str]:
         skill = self._registry.get(node.skill)
         if skill is None:
@@ -178,7 +197,16 @@ class DAGExecutor:
             )
 
         started_at = time.perf_counter()
-        result = await self._run_with_retry(skill, node, dependency_outputs, normalized_prompt, recent_memory)
+        result = await self._run_with_retry(
+            skill,
+            node,
+            dependency_outputs,
+            normalized_prompt,
+            recent_memory,
+            response_language,
+            detected_input_language,
+            explicit_response_language,
+        )
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         metadata = {**(result.metadata or {}), "duration_ms": duration_ms, "cache_hit": False}
         result.metadata = metadata
@@ -208,6 +236,9 @@ class DAGExecutor:
         dependency_outputs: dict[str, Any],
         normalized_prompt: str,
         recent_memory: str,
+        response_language: str,
+        detected_input_language: str,
+        explicit_response_language: bool,
     ) -> SkillResult:
         last_result = SkillResult(success=False, error="unknown_error", metadata={"error_type": "system"})
         selected_tool = self._tool_resolver.resolve(node.input.get("selected_tool"))
@@ -219,6 +250,9 @@ class DAGExecutor:
                     dependency_outputs=dependency_outputs,
                     recent_memory=recent_memory,
                     selected_tool=selected_tool,
+                    response_language=response_language,
+                    detected_input_language=detected_input_language,
+                    explicit_response_language=explicit_response_language,
                 )
                 result = await asyncio.wait_for(skill.execute(context), timeout=self._node_timeout_seconds)
                 error_text = result.error or ""

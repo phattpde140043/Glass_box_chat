@@ -6,6 +6,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .language_policy import DEFAULT_RESPONSE_LANGUAGE, normalize_language_name
 from .planner import AnalysisResult, needs_research_text
 
 
@@ -43,6 +44,10 @@ class AnalysisEnvelopeModel(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     intent_tier: Literal["trivial", "direct", "research", "analytical"] = Field(default="direct")
     intents: list[IntentCandidateModel] = Field(default_factory=list, max_length=3)
+    detected_input_language: str = Field(default=DEFAULT_RESPONSE_LANGUAGE, min_length=1, max_length=80)
+    response_language: str = Field(default=DEFAULT_RESPONSE_LANGUAGE, min_length=1, max_length=80)
+    explicit_response_language: bool = False
+    language_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @field_validator("normalized_prompt", "intent")
     @classmethod
@@ -121,8 +126,6 @@ class InputAnalyzer:
     }
 
     _MARKET_HINTS = (
-        "gia vang",
-        "giá vàng",
         "gold price",
         "xau",
         "xauusd",
@@ -131,118 +134,71 @@ class InputAnalyzer:
         "btc",
         "ethereum",
         "eth",
-        "tỷ giá",
-        "ty gia",
         "exchange rate",
         "forex",
     )
 
     _MARKET_ANALYSIS_HINTS = (
-        "nhận định",
-        "nhan dinh",
-        "phân tích",
-        "phan tich",
-        "tình hình",
-        "tinh hinh",
-        "xu hướng",
-        "xu huong",
         "outlook",
         "trend",
         "assessment",
         "analyze",
         "analysis",
-        "đánh giá",
-        "danh gia",
     )
 
     _COMMODITY_HINTS = (
-        "cà phê",
-        "ca phe",
         "cafe",
         "coffee",
         "arabica",
         "robusta",
         "commodity",
-        "nông sản",
-        "nong san",
-        "hồ tiêu",
-        "ho tieu",
         "pepper price",
     )
 
     _TREND_TIME_HINTS = (
-        "hôm nay",
-        "hom nay",
         "today",
-        "tuần",
-        "tuan",
         "week",
-        "tháng",
-        "thang",
         "month",
         "months",
         "past",
         "last",
         "6 months",
         "six months",
-        "quý",
-        "quy",
         "quarter",
-        "năm",
-        "nam",
         "year",
-        "gần đây",
-        "gan day",
         "recent",
     )
 
     _LOOKUP_HINTS = (
-        "thông tin",
-        "thong tin",
-        "tìm kiếm",
-        "tim kiem",
-        "tra cứu",
-        "tra cuu",
         "information search",
         "lookup",
         "find information",
         "who is",
         "what is",
-        "là gì",
-        "la gi",
     )
 
     _LOCAL_DISCOVERY_HINTS = (
-        "nhà hàng",
-        "nha hang",
         "restaurant",
-        "quán ăn",
-        "quan an",
-        "khách sạn",
-        "khach san",
+        "restaurants",
         "hotel",
+        "hotels",
         "resort",
+        "resorts",
         "homestay",
-        "địa điểm",
-        "dia diem",
-        "điểm đến",
-        "diem den",
+        "homestays",
         "attraction",
+        "attractions",
         "things to do",
         "near me",
+        "beach",
     )
 
     _TRAVEL_PLAN_HINTS = (
-        "du lịch",
-        "du lich",
         "travel plan",
         "itinerary",
-        "lịch trình",
-        "lich trinh",
-        "2 ngày",
-        "3 ngày",
-        "kế hoạch đi",
-        "ke hoach di",
+        "2 day",
+        "3 day",
+        "trip plan",
     )
 
     _SIMPLE_FACT_HINTS = (
@@ -252,18 +208,11 @@ class InputAnalyzer:
         "capital",
         "definition",
         "meaning",
-        "là gì",
-        "la gi",
-        "dân số",
-        "dan so",
-        "thủ đô",
-        "thu do",
     )
 
     _SIMPLE_FACT_ENTITIES = (
         "unesco",
         "vietnam",
-        "việt nam",
         "hanoi",
         "ha noi",
     )
@@ -281,7 +230,7 @@ class InputAnalyzer:
     @staticmethod
     def _contains_hint(text: str, hints: tuple[str, ...]) -> bool:
         lowered = text.lower()
-        tokens = {token for token in re.split(r"[^\wÀ-ỹ]+", lowered) if token}
+        tokens = {token for token in re.split(r"[^\w]+", lowered) if token}
         for hint in hints:
             normalized_hint = hint.lower()
             if " " in normalized_hint:
@@ -305,13 +254,20 @@ class InputAnalyzer:
             '"keywords":["..."],"sub_tasks":[{"description":"..."}],'
             '"execution_mode":"parallel|sequential","time_window":"intraday|1w|1m|1q|1y|recent|unspecified",'
             '"confidence":0.0,"intent_tier":"trivial|direct|research|analytical",'
-            '"intents":[{"name":"...","confidence":0.0,"tier":"direct"}]}'
+            '"intents":[{"name":"...","confidence":0.0,"tier":"direct"}],'
+            '"detected_input_language":"english","response_language":"english",'
+            '"explicit_response_language":false,"language_confidence":0.0}'
             ' intent_tier: trivial=greeting/chitchat no tools needed,'
             ' direct=LLM answers from training data,'
             ' research=requires live data or external tool calls,'
             ' analytical=multi-step analysis with synthesis.'
             ' intents: top-K intent candidates sorted by confidence desc (max 3);'
             ' intent field must match intents[0].name.'
+            ' detected_input_language: language of the user message.'
+            ' normalized_prompt: MUST be rewritten into clear English while preserving meaning, entities, time windows, and constraints from the user message.'
+            ' response_language: MUST always be english.'
+            ' explicit_response_language: MUST always be false because this runtime is English-only.'
+            ' If the source message is unclear, still produce the best English normalization and set response_language to english.'
             ' Prefer intent labels from this set when applicable: '
             'request|question|research|knowledge_lookup|information_retrieval|market_price|market_analysis|trend_analysis|simple_fact|local_discovery|travel_planning.'
         )
@@ -336,6 +292,10 @@ class InputAnalyzer:
             "confidence": float(validated.confidence),
             "intent_tier": validated.intent_tier,
             "intent_candidates": [c.model_dump() for c in validated.intents],
+            "detected_input_language": normalize_language_name(validated.detected_input_language),
+            "response_language": DEFAULT_RESPONSE_LANGUAGE,
+            "explicit_response_language": False,
+            "language_confidence": float(validated.language_confidence),
         }
         return self._resolve_intent(analysis)
 
@@ -343,20 +303,20 @@ class InputAnalyzer:
         normalized = re.sub(r"\s+", " ", prompt).strip()
         lowered = normalized.lower()
 
-        intent = "question" if "?" in normalized or lowered.startswith(("what", "why", "how", "tại sao", "làm sao")) else "request"
+        intent = "question" if "?" in normalized or lowered.startswith(("what", "why", "how")) else "request"
         if needs_research_text(normalized):
             intent = "research"
 
         sentiment = "neutral"
-        if any(word in lowered for word in ("tệ", "bad", "lỗi", "khó chịu", "frustrated")):
+        if any(word in lowered for word in ("bad", "error", "frustrated", "annoyed")):
             sentiment = "negative"
-        elif any(word in lowered for word in ("tốt", "great", "hay", "good", "nice")):
+        elif any(word in lowered for word in ("great", "good", "nice", "helpful")):
             sentiment = "positive"
 
-        tokens = [token for token in re.split(r"[^\wÀ-ỹ]+", lowered) if len(token) >= 3 and token not in self._stopwords]
+        tokens = [token for token in re.split(r"[^\w]+", lowered) if len(token) >= 3 and token not in self._stopwords]
         keywords = list(dict.fromkeys(tokens))[:6]
 
-        clauses = [segment.strip() for segment in re.split(r"\.|,|;|\band\b|\bvà\b", normalized, flags=re.IGNORECASE) if segment.strip()]
+        clauses = [segment.strip() for segment in re.split(r"\.|,|;|\band\b", normalized, flags=re.IGNORECASE) if segment.strip()]
         raw_sub_tasks = clauses[:4] if clauses else [normalized]
         sub_tasks = [{"id": f"task-{index + 1}", "description": description} for index, description in enumerate(raw_sub_tasks)]
         execution_mode = "parallel" if len(sub_tasks) > 1 else "sequential"
@@ -371,6 +331,10 @@ class InputAnalyzer:
             "execution_mode": execution_mode,
             "time_window": self._infer_time_window(normalized),
             "confidence": 0.35,
+            "detected_input_language": DEFAULT_RESPONSE_LANGUAGE,
+            "response_language": DEFAULT_RESPONSE_LANGUAGE,
+            "explicit_response_language": False,
+            "language_confidence": 0.0,
         }
         return self._resolve_intent(analysis)
 

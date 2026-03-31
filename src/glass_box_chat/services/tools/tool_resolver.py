@@ -1,13 +1,14 @@
 class ToolResolver:
     """Resolves a tool name or tool-like object to a concrete tool instance.
 
-    New tools can be registered at composition-root time via ``register()``,
-    without modifying this class (OCP).
+    New tools can be registered at composition-root time via ``register()``.
+    Factories may be any zero-argument callable (class or lambda), so callers
+    can inject dependencies without modifying this class (OCP).
     """
 
     def __init__(self) -> None:
         self._tool_instances: dict[str, object] = {}
-        self._factories: dict[str, type] = {}
+        self._factories: dict[str, object] = {}  # zero-arg callable -> instance
         self._register_defaults()
 
     def _register_defaults(self) -> None:
@@ -32,9 +33,16 @@ class ToolResolver:
             "local_search": LocalSearchTool,
         }
 
-    def register(self, name: str, factory: type) -> None:
-        """Register a custom tool factory so it can be resolved by name."""
+    def register(self, name: str, factory: object) -> None:
+        """Register a custom tool factory (any zero-arg callable) by name.
+
+        Passing a class is equivalent to the old behaviour.  Passing a lambda
+        or any other callable lets callers inject dependencies at
+        composition-root time without modifying this class.
+        """
         self._factories[name.strip().lower()] = factory
+        # Evict any cached instance so the new factory takes effect immediately.
+        self._tool_instances.pop(name.strip().lower(), None)
 
     def resolve(self, selected_tool: object | None) -> object | None:
         if selected_tool is None:

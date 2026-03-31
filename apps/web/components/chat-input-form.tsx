@@ -30,7 +30,7 @@ export function ChatInputForm({
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Nhập tin nhắn của bạn..."
+          placeholder="Type your message..."
           rows={1}
           maxLength={maxLength}
           disabled={isSending}
@@ -38,7 +38,7 @@ export function ChatInputForm({
           aria-describedby="chat-input-meta chat-input-error"
         />
         <div className="chat-input-meta" id="chat-input-meta">
-          <span>Enter để gửi, Shift + Enter để xuống dòng</span>
+          <span>Press Enter to send, Shift + Enter for a new line</span>
           <span>
             {currentLength}/{maxLength}
           </span>
@@ -51,7 +51,7 @@ export function ChatInputForm({
       </div>
 
       <button type="submit" disabled={!canSend}>
-        Gửi
+        Send
       </button>
     </form>
   );

@@ -7,6 +7,7 @@ from .news_api_tool import NewsAPITool
 from .fetch_page_tool import FetchPageTool
 from .calculator_tool import CalculatorTool
 from .finance_tool import FinanceTool
+from .local_search_tool import LocalSearchTool
 
 __all__ = [
     "Tool",
@@ -19,4 +20,5 @@ __all__ = [
     "FetchPageTool",
     "CalculatorTool",
     "FinanceTool",
+    "LocalSearchTool",
 ]

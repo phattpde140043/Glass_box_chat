@@ -26,7 +26,7 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
 
-  return "Không thể xử lý stream từ backend runtime.";
+  return "Cannot process stream from backend runtime.";
 }
 
 function validateSsePayload(eventName: string, rawData: string): string {
@@ -137,7 +137,7 @@ export async function POST(request: NextRequest) {
     const body = (await request.json()) as unknown;
     payload = RunChatRequestModel.fromUnknown(body).toJSON();
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Payload gửi lên không hợp lệ.";
+    const errorMessage = error instanceof Error ? error.message : "Submitted payload is invalid.";
     return NextResponse.json({ error: errorMessage }, { status: 400 });
   }
 
@@ -155,20 +155,20 @@ export async function POST(request: NextRequest) {
     });
   } catch {
     return NextResponse.json(
-      { error: "Không kết nối được tới backend runtime. Hãy kiểm tra dịch vụ API." },
+      { error: "Cannot connect to backend runtime. Please check the API service." },
       { status: 502 },
     );
   }
 
   if (!upstreamResponse.ok) {
     return NextResponse.json(
-      { error: `Backend runtime trả về HTTP ${upstreamResponse.status}.` },
+      { error: `Backend runtime returned HTTP ${upstreamResponse.status}.` },
       { status: upstreamResponse.status },
     );
   }
 
   if (!upstreamResponse.body) {
-    return NextResponse.json({ error: "Backend runtime không trả về stream hợp lệ." }, { status: 502 });
+    return NextResponse.json({ error: "Backend runtime did not return a valid stream." }, { status: 502 });
   }
 
   return new Response(createValidatedSseStream(upstreamResponse.body), {

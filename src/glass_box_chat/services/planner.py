@@ -10,42 +10,27 @@ from pydantic import BaseModel, Field, field_validator
 from .skill_core import DAGNode, RoutedSkill
 
 TIME_SENSITIVE_HINTS = (
-    "hôm nay",
     "today",
     "latest",
-    "mới nhất",
     "weather",
-    "thời tiết",
     "news",
-    "tin tức",
     "price",
-    "giá",
-    "hiện tại",
     "current",
 )
 
 WEATHER_HINTS = (
     "weather",
-    "thời tiết",
-    "thoi tiet",
     "forecast",
-    "dự báo",
-    "du bao",
     "rain",
     "snow",
     "temperature",
     "humidity",
-    "mưa",
-    "tuyết",
-    "nhiệt độ",
 )
 
 # Time-only words — NOT standalone weather signals; only amplify when a core weather term is also present.
-_WEATHER_TIME_WORDS = ("tomorrow", "ngày mai", "ngay mai")
+_WEATHER_TIME_WORDS = ("tomorrow",)
 
 MARKET_HINTS = (
-    "gia vang",
-    "giá vàng",
     "gold price",
     "xau",
     "xauusd",
@@ -54,39 +39,19 @@ MARKET_HINTS = (
     "btc",
     "ethereum",
     "eth",
-    "tỷ giá",
-    "ty gia",
     "exchange rate",
     "forex",
 )
 
 MARKET_ANALYSIS_HINTS = (
-    "nhận định",
-    "nhan dinh",
-    "phân tích",
-    "phan tich",
-    "tình hình",
-    "tinh hinh",
-    "xu hướng",
-    "xu huong",
     "outlook",
     "trend",
     "assessment",
     "analyze",
     "analysis",
-    "đánh giá",
-    "danh gia",
 )
 
 GENERIC_ANALYSIS_HINTS = (
-    "phân tích",
-    "phan tich",
-    "nhận định",
-    "nhan dinh",
-    "xu hướng",
-    "xu huong",
-    "dự báo",
-    "du bao",
     "trend",
     "outlook",
     "assessment",
@@ -96,64 +61,37 @@ GENERIC_ANALYSIS_HINTS = (
 )
 
 COMMODITY_HINTS = (
-    "cà phê",
-    "ca phe",
     "cafe",
     "coffee",
     "arabica",
     "robusta",
     "commodity",
-    "nông sản",
-    "nong san",
-    "hồ tiêu",
-    "ho tieu",
     "pepper",
 )
 
 RESEARCH_HINTS = (
-    "nghiên cứu",
-    "tra cứu",
-    "tìm thông tin",
     "search",
     "research",
     *TIME_SENSITIVE_HINTS,
 )
 
 LOOKUP_HINTS = (
-    "thông tin",
-    "thong tin",
-    "tìm kiếm",
-    "tim kiem",
-    "tra cứu",
-    "tra cuu",
     "information search",
     "lookup",
     "find information",
     "who is",
     "what is",
-    "là gì",
-    "la gi",
 )
 
 LOCAL_DISCOVERY_HINTS = (
-    "nhà hàng",
-    "nha hang",
     "restaurant",
     "restaurants",
-    "quán ăn",
-    "quan an",
-    "khách sạn",
-    "khach san",
     "hotel",
     "hotels",
     "resort",
     "resorts",
     "homestay",
     "homestays",
-    "địa điểm",
-    "dia diem",
-    "điểm đến",
-    "diem den",
     "attraction",
     "attractions",
     "things to do",
@@ -174,34 +112,14 @@ LOCAL_DISCOVERY_HINTS = (
     "cuisine",
     "traditional food",
     "street food",
-    "ăn uống",
-    "an uong",
-    "ăn gì",
-    "an gi",
-    "ăn gì ngon",
-    "ăn ở đâu",
-    "thứ ăn",
-    "chu an",
-    "món ăn",
-    "mon an",
-    "đồ ăn",
-    "do an",
-    "đồ truyền thống",
-    "do truyen thong",
-    "truyền thống",
-    "truyen thong",
     "vacation",
 )
 
 TRAVEL_PLAN_HINTS = (
-    "du lịch",
-    "du lich",
     "travel plan",
     "itinerary",
-    "lịch trình",
-    "lich trinh",
-    "2 ngày",
-    "3 ngày",
+    "2 day",
+    "3 day",
 )
 
 SIMPLE_FACT_HINTS = (
@@ -211,27 +129,14 @@ SIMPLE_FACT_HINTS = (
     "capital",
     "definition",
     "meaning",
-    "là gì",
-    "la gi",
-    "dân số",
-    "dan so",
-    "thủ đô",
-    "thu do",
 )
 
 EXPLICIT_RESEARCH_HINTS = (
-    "nghiên cứu",
-    "tra cứu",
-    "tìm thông tin",
     "search",
     "research",
 )
 
 GREETING_HINTS = (
-    "xin chao",
-    "xin chào",
-    "chao",
-    "chào",
     "hello",
     "hi",
     "hey",
@@ -258,6 +163,10 @@ class AnalysisResult(TypedDict):
     decision_reason: NotRequired[str]
     intent_candidates: NotRequired[list[dict]]
     is_ambiguous: NotRequired[bool]
+    detected_input_language: NotRequired[str]
+    response_language: NotRequired[str]
+    explicit_response_language: NotRequired[bool]
+    language_confidence: NotRequired[float]
 
 
 class PlannerDependencyModel(BaseModel):
@@ -687,7 +596,7 @@ class AutoDAGPlanner:
                         "route_score": "intent_local_verify",
                         "cache_policy": "default",
                     },
-                    depends_on=["local-search"],
+                    depends_on=["geo-intent", "local-search"],
                     branch="main",
                     priority=110,
                 ),
@@ -706,10 +615,24 @@ class AutoDAGPlanner:
                     priority=104,
                 ),
                 DAGNode(
+                    id="candidate-extract",
+                    skill="candidate_extraction",
+                    input={
+                        "id": "candidate-extract",
+                        "description": "Extract structured place candidates from local evidence",
+                        "routed_skill": "candidate_extraction",
+                        "route_score": "intent_local_candidate_extract",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["local-search", "review-consensus"],
+                    branch="main",
+                    priority=102,
+                ),
+                DAGNode(
                     id="synthesis",
                     skill="synthesizer",
-                    input={"description": "Synthesize verified local place recommendations"},
-                    depends_on=["place-verify", "review-consensus"],
+                    input={"description": "Synthesize structured local place recommendations"},
+                    depends_on=["geo-intent", "place-verify", "candidate-extract", "review-consensus"],
                     branch="main",
                     priority=-1,
                 ),
@@ -763,6 +686,20 @@ class AutoDAGPlanner:
                     priority=112,
                 ),
                 DAGNode(
+                    id="candidate-extract",
+                    skill="candidate_extraction",
+                    input={
+                        "id": "candidate-extract",
+                        "description": "Extract structured travel place candidates from local evidence",
+                        "routed_skill": "candidate_extraction",
+                        "route_score": "intent_travel_candidate_extract",
+                        "cache_policy": "default",
+                    },
+                    depends_on=["local-search"],
+                    branch="main",
+                    priority=108,
+                ),
+                DAGNode(
                     id="itinerary",
                     skill="itinerary_planner",
                     input={
@@ -772,7 +709,7 @@ class AutoDAGPlanner:
                         "route_score": "intent_travel_itinerary",
                         "cache_policy": "default",
                     },
-                    depends_on=["place-verify"],
+                    depends_on=["place-verify", "candidate-extract"],
                     branch="main",
                     priority=106,
                 ),
@@ -780,7 +717,7 @@ class AutoDAGPlanner:
                     id="synthesis",
                     skill="synthesizer",
                     input={"description": "Synthesize final travel itinerary recommendation"},
-                    depends_on=["itinerary"],
+                    depends_on=["itinerary", "candidate-extract"],
                     branch="main",
                     priority=-1,
                 ),
@@ -848,7 +785,7 @@ class AutoDAGPlanner:
 
             # Guardrail: internal pipeline skills require dependency outputs and should not be
             # directly selected for user-facing tasks.
-            if routed_skill in {"place_verification", "review_consensus", "itinerary_planner", "geo_intent", "fusion"}:
+            if routed_skill in {"place_verification", "review_consensus", "candidate_extraction", "itinerary_planner", "geo_intent", "fusion"}:
                 description = str(task.get("description", ""))
                 routed_skill = "research" if needs_research_text(description) else "general_answer"
 

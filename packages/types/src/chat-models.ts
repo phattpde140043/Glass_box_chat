@@ -1,6 +1,5 @@
 import { ZodError } from "zod";
 import {
-  type AssistantSourceDetail,
   chatMessageSchema,
   runChatRequestSchema,
   traceEventListSchema,
@@ -15,15 +14,37 @@ import {
 export const INITIAL_TRACE_WINDOW = 24;
 export const TRACE_WINDOW_STEP = 18;
 
-const IMPORTANT_EVENTS = new Set<TraceEventType>(["thinking", "tool_call", "waiting", "done"]);
+const IMPORTANT_EVENTS = new Set<TraceEventType>([
+  "thinking",
+  "tool_call",
+  "node_start",
+  "node_done",
+  "subagent_start",
+  "subagent_done",
+  "artifact_created",
+  "artifact_updated",
+  "waiting",
+  "done",
+]);
 
 const DEFAULT_ASSISTANT_MESSAGE =
-  "Hello, I am Glass Box Chat. Send a prompt and the backend will process the pipeline and stream trace events over SSE.";
+  "Hello, I am Glass Box Chat. Send a question and the backend will process the pipeline and stream trace events over SSE.";
+
+export type TraceMessageSection = {
+  messageId: string;
+  events: TraceEventRecord[];
+};
 
 export type TraceSessionSection = {
   sessionId: string;
   sessionLabel: string;
   events: TraceEventRecord[];
+};
+
+export type TraceSessionGroupedByMessage = {
+  sessionId: string;
+  sessionLabel: string;
+  messages: TraceMessageSection[];
 };
 
 export class ChatMessageModel {
@@ -32,18 +53,16 @@ export class ChatMessageModel {
   static assistant(
     content: string,
     id = `assistant-${crypto.randomUUID()}`,
-    options?: {
-      sources?: string[];
-      sourceDetails?: AssistantSourceDetail[];
-    },
+    sources?: string[],
+    sourceDetails?: Array<{ title: string; url: string; freshness: string }>,
   ): ChatMessageModel {
     return new ChatMessageModel(
       chatMessageSchema.parse({
         id,
         role: "assistant",
         content,
-        sources: options?.sources,
-        sourceDetails: options?.sourceDetails,
+        ...(sources && sources.length > 0 ? { sources } : {}),
+        ...(sourceDetails && sourceDetails.length > 0 ? { sourceDetails } : {}),
       }),
     );
   }
@@ -81,7 +100,7 @@ export class ChatMessageModel {
   }
 
   static extractFirstIssue(error: ZodError): string {
-    return error.issues[0]?.message ?? "Message data is invalid.";
+    return error.issues[0]?.message ?? "Dữ liệu tin nhắn không hợp lệ.";
   }
 
   toJSON(): ChatMessageRecord {
@@ -92,16 +111,16 @@ export class ChatMessageModel {
 export class RunChatRequestModel {
   private constructor(private readonly value: RunChatRequestRecord) {}
 
-  static fromPrompt(prompt: string): RunChatRequestModel {
-    return new RunChatRequestModel(runChatRequestSchema.parse({ prompt }));
+  static fromPrompt(prompt: string, sessionId: string, messageId: string): RunChatRequestModel {
+    return new RunChatRequestModel(runChatRequestSchema.parse({ prompt, sessionId, messageId }));
   }
 
   static fromUnknown(input: unknown): RunChatRequestModel {
     return new RunChatRequestModel(runChatRequestSchema.parse(input));
   }
 
-  static getValidationMessage(prompt: string): string | null {
-    const result = runChatRequestSchema.safeParse({ prompt });
+  static getValidationMessage(prompt: string, sessionId: string = ""): string | null {
+    const result = runChatRequestSchema.safeParse({ prompt, sessionId: sessionId || "dummy-session", messageId: "dummy-message-id" });
     if (result.success) {
       return null;
     }
@@ -130,13 +149,14 @@ export class TraceEventModel {
       traceEventSchema.parse({
         id: "trace-bootstrap",
         event: "agent_start",
-        detail: "Runtime trace is ready. Waiting for the first user prompt.",
+        detail: "Runtime Trace is ready. Waiting for the user's first question.",
         agent: "CoordinatorAgent",
         branch: "main",
         mode: "sequential",
         createdAt: new Date().toLocaleTimeString(),
         sessionId: "system",
         sessionLabel: "System",
+        messageId: "msg-system",
       }),
     ).toJSON();
   }
@@ -167,6 +187,37 @@ export class TraceEventModel {
       });
 
       return sections;
+    }, []);
+  }
+
+  static groupVisibleByMessage(events: TraceEventRecord[], visibleTraceCount: number): TraceSessionGroupedByMessage[] {
+    const visibleEvents = events.slice(Math.max(0, events.length - visibleTraceCount));
+
+    return visibleEvents.reduce<TraceSessionGroupedByMessage[]>((sessions, event) => {
+      let session = sessions.find(s => s.sessionId === event.sessionId);
+
+      if (!session) {
+        session = {
+          sessionId: event.sessionId,
+          sessionLabel: event.sessionLabel,
+          messages: [],
+        };
+        sessions.push(session);
+      }
+
+      let message = session.messages.find(m => m.messageId === event.messageId);
+
+      if (!message) {
+        message = {
+          messageId: event.messageId,
+          events: [],
+        };
+        session.messages.push(message);
+      }
+
+      message.events.push(event);
+
+      return sessions;
     }, []);
   }
 
