@@ -4,7 +4,7 @@ from typing import Any
 
 
 def load_shared_chat_contract() -> dict[str, Any]:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     contract_path = repo_root / "packages" / "types" / "src" / "chat-contract.json"
 
     with contract_path.open("r", encoding="utf-8") as file:

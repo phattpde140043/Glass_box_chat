@@ -60,8 +60,13 @@ if /I "%NO_START%"=="1" (
 )
 
 echo [run-backend] Starting FastAPI with auto-reload...
-pushd "%API_DIR%"
-call "%VENV_PYTHON%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+pushd "%ROOT_DIR%"
+if defined PYTHONPATH (
+  set "PYTHONPATH=%ROOT_DIR%src;%PYTHONPATH%"
+) else (
+  set "PYTHONPATH=%ROOT_DIR%src"
+)
+call "%VENV_PYTHON%" -m uvicorn glass_box_chat.main:app --host 0.0.0.0 --port 8000 --reload
 set "EXIT_CODE=%ERRORLEVEL%"
 popd
 
