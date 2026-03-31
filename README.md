@@ -55,9 +55,13 @@ This project adds a clear visibility layer on top of the AI runtime.
 
 ## Demo
 
-Public deployment is not attached to this repository yet.
+▶️ **[Watch the demo on Loom](https://www.loom.com/share/24eb38787dc644e089c1dd5a957eaee1)**
 
-You can run the full project locally:
+The demo shows the live trace panel, tool call visualization, and multi-step reasoning flow in action.
+
+---
+
+You can also run the full project locally:
 
 - Backend: `./run-backend.sh` or `run-backend.cmd`
 - Frontend: `./run-frontend.sh` or `run-frontend.cmd`
