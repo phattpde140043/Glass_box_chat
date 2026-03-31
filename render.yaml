@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: glass-box-chat-api
+    runtime: python
+    region: singapore  # change to: oregon, frankfurt, ohio, virginia as needed
+    plan: free          # or: starter, standard, pro
+
+    # Build: install dependencies from apps/api/requirements.txt
+    buildCommand: pip install -r apps/api/requirements.txt
+
+    # Start: launch uvicorn with the correct module path
+    # PYTHONPATH=src makes glass_box_chat package importable
+    startCommand: uvicorn glass_box_chat.main:app --host 0.0.0.0 --port $PORT
+
+    # Render injects $PORT automatically; set path and Python source root
+    envVars:
+      - key: PYTHONPATH
+        value: src
+
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+
+      - key: WEATHER_ENABLE_BERT_EXTRACTOR
+        value: "false"
+
+      # Set these in the Render dashboard (do NOT commit real keys here)
+      - key: ANTHROPIC_API_KEY
+        sync: false   # prompt in dashboard
+
+      - key: GOOGLE_API_KEY
+        sync: false   # prompt in dashboard
