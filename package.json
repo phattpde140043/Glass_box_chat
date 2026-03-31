@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "The Glass Box - Agent Runtime Platform",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
@@ -15,5 +18,5 @@
     "eslint": "latest",
     "typescript": "latest"
   },
-  "packageManager": "pnpm@9.0.0"
+  "packageManager": "pnpm@9.15.9"
 }
